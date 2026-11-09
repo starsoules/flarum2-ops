@@ -1,6 +1,6 @@
 # flarum2-ops
 
-[![CI](https://github.com/NeoGeoOne/flarum2-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/NeoGeoOne/flarum2-ops/actions/workflows/ci.yml)
+[![CI](https://github.com/starsoules/flarum2-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/starsoules/flarum2-ops/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Lets an AI agent run a [Flarum 2](https://flarum.org) forum through its official admin API and switch between
@@ -41,7 +41,7 @@ Verified against Flarum 2.0.2:
 ## Setup
 
 ```bash
-git clone https://github.com/NeoGeoOne/flarum2-ops.git
+git clone https://github.com/starsoules/flarum2-ops.git
 cd flarum2-ops/tools/flarum2-ops && npm ci && npm run build && cd ../..
 cp forum.example.json forum.json      # set base_url and forum_root of your forum
 bash skills/flarum2-design-ops/scripts/ops.sh login    # in a terminal: admin login, password typed hidden
@@ -120,7 +120,7 @@ python3 tools/validate.py            # Agent Skills spec checks for the skill
 
 ## Contributing
 
-Bug reports and ideas are welcome as [issues](https://github.com/NeoGeoOne/flarum2-ops/issues/new/choose).
+Bug reports and ideas are welcome as [issues](https://github.com/starsoules/flarum2-ops/issues/new/choose).
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Security issues: see
 [SECURITY.md](SECURITY.md).
 

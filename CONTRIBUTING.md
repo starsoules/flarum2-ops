@@ -4,7 +4,7 @@ Thanks for your interest in flarum2-ops.
 
 ## Issues
 
-Bug reports and ideas are welcome. Use one of the [issue forms](https://github.com/NeoGeoOne/flarum2-ops/issues/new/choose) and include
+Bug reports and ideas are welcome. Use one of the [issue forms](https://github.com/starsoules/flarum2-ops/issues/new/choose) and include
 the Flarum version, the steps to reproduce, what you expected and what happened.
 
 ## Pull requests

@@ -13,15 +13,15 @@
     "admin"
   ],
   "license": "MIT",
-  "author": "NeoGeoOne",
+  "author": "starsoules",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NeoGeoOne/flarum2-ops.git",
+    "url": "git+https://github.com/starsoules/flarum2-ops.git",
     "directory": "tools/flarum2-ops"
   },
-  "homepage": "https://github.com/NeoGeoOne/flarum2-ops#readme",
+  "homepage": "https://github.com/starsoules/flarum2-ops#readme",
   "bugs": {
-    "url": "https://github.com/NeoGeoOne/flarum2-ops/issues"
+    "url": "https://github.com/starsoules/flarum2-ops/issues"
   },
   "type": "module",
   "bin": {
