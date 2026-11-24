@@ -20,5 +20,14 @@ if ! command -v node >/dev/null 2>&1; then
     exit 1
 fi
 
-export FLARUM2_OPS_CONFIG="${FLARUM2_OPS_CONFIG:-$repo/forum.json}"
+# Use <repo>/forum.json when it exists; without it the CLI is configured by the environment (FLARUM_URL, …).
+if [[ -z "${FLARUM2_OPS_CONFIG:-}" && -f "$repo/forum.json" ]]; then
+    export FLARUM2_OPS_CONFIG="$repo/forum.json"
+fi
+# Screenshots need a Python with Playwright: use the first python3 in PATH that can import it (as run-mcp.sh does).
+if [[ -z "${FLARUM2_OPS_PYTHON:-}" ]]; then
+    while read -r py; do
+        if "$py" -I -c "import playwright" >/dev/null 2>&1; then export FLARUM2_OPS_PYTHON="$py"; break; fi
+    done < <(type -ap python3)
+fi
 exec node "$cli" "$@"

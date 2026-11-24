@@ -54,10 +54,10 @@ with `flarum_settings_get prefixes:["<id>."]` or `listKeys`, and list the extens
 
 ## Protected (need `allowProtected` + explicit approval; never inside design-sets)
 
-`maintenance_mode` (`none`/`high`/`low`/`safe`), `safe_mode_extensions`, all `mail_*` except
-`mail_driver`/`mail_format`/`mail_from`, anything that looks like a credential (`*password*`, `*secret*`,
-`*token*`, `*api_key*`, `*_key`), `slug_driver_*`, `search_driver_*`, `display_name_driver`, `avatar_driver`,
-`default_locale`, `allow_sign_up`. Secret-looking values are never displayed by the tools.
+`maintenance_mode` (`none`/`high`/`low`/`safe`), `safe_mode_extensions`, all `mail_*`, anything that looks like
+a credential (`*password*`, `*secret*`, `*token*`, `*api_key*`, `*_key`), `slug_driver_*`, `search_driver_*`,
+`display_name_driver`, `avatar_driver`, `default_locale`, `allow_sign_up`. Secret values are never displayed by
+the tools: credential-looking keys and every `mail_*` key except `mail_driver`/`mail_format`/`mail_from`.
 
 ## Forbidden (managed by Flarum; writing breaks things)
 

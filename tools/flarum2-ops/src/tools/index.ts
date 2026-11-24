@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { FlarumClient } from "../flarum-client.js";
-import { result, errorResult, trimDoc, fieldsSchema } from "./shared.js";
+import { FlarumClient, normalizeApiPath } from "../flarum-client.js";
+import { result, errorResult, trimDoc, fieldsSchema, confirmField, dryRun, refusedManagedWrite, segmentSchema } from "./shared.js";
 import { whoami } from "../auth.js";
 
 /**
@@ -40,9 +40,7 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         "or use fields/flarum_get to read full content. " +
         'Example: type="discussions", filter={ q: "search terms" }, include="user,tags".',
       inputSchema: {
-        type: z
-          .string()
-          .describe('Resource type, e.g. "discussions", "posts", "users", "tags", "groups".'),
+        type: segmentSchema("type").describe('Resource type, e.g. "discussions", "posts", "users", "tags", "groups".'),
         filter: z
           .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
           .optional()
@@ -93,8 +91,8 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         "and narrowing fields. Returns full field values by default (no truncation). " +
         'Example: type="discussions", id="42", include="posts,user".',
       inputSchema: {
-        type: z.string().describe('Resource type, e.g. "discussions", "users".'),
-        id: z.string().describe("Resource id."),
+        type: segmentSchema("type").describe('Resource type, e.g. "discussions", "users".'),
+        id: segmentSchema("id").describe("Resource id."),
         include: z.string().optional().describe("Comma-separated relationships to include."),
         fields: fieldsSchema,
         maxFieldChars: z
@@ -161,7 +159,10 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
       description:
         "Escape hatch: make an arbitrary request to any Flarum API endpoint, for anything not " +
         "covered by the typed tools (custom extension routes, non-JSON:API endpoints, etc.). " +
-        "In read-only mode, non-GET methods are refused. Returns { status, ok, body } (204 = success with empty body; " +
+        "In read-only mode, non-GET methods are refused; in write mode a non-GET request is a dry run unless confirm: true, " +
+        "and writes to settings, extensions, permissions, images, cache, extension bisect and the extension manager are refused " +
+        "(use their dedicated tools, which " +
+        "enforce the key policy, snapshot and verify). Returns { status, ok, body } (204 = success with empty body; " +
         "NDJSON responses such as DELETE /cache are parsed into an array). " +
         'Path is relative to the API root, e.g. "/discussions" or "/settings" (a leading "/api" is stripped).',
       inputSchema: {
@@ -173,10 +174,18 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         timeoutMs: z.number().int().min(1000).max(600000).optional().describe("Per-call timeout (default 30000)."),
         query: z.record(z.string(), z.unknown()).optional().describe("Query parameters."),
         body: z.unknown().optional().describe("Request body (object), sent as JSON."),
+        confirm: confirmField.describe("Non-GET only: false (default) = dry run. Set true only after the user approved it."),
       },
     },
-    async ({ method, path, query, body, timeoutMs }) => {
+    async ({ method, path, query, body, timeoutMs, confirm }) => {
       try {
+        // Read-only mode: the client refuses non-GET centrally (no network), so leave that path as it was.
+        if (method !== "GET" && !client.readOnly) {
+          const p = normalizeApiPath(path);
+          const refused = refusedManagedWrite(method, p);
+          if (refused) return refused;
+          if (!confirm) return dryRun({ method, path: `/api${p}`, query, body: normalizeBody(body) });
+        }
         const res = await client.raw({ method, path, query, body: normalizeBody(body), timeoutMs });
         if (!res.ok) {
           return {
@@ -243,21 +252,26 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         'Example: type="discussions", attributes={ title, content }, ' +
         'relationships={ tags: { data: [{ type: "tags", id: "1" }] } }.',
       inputSchema: {
-        type: z.string().describe('Resource type, e.g. "discussions", "posts".'),
+        type: segmentSchema("type").describe('Resource type, e.g. "discussions", "posts".'),
         attributes: z.record(z.string(), z.unknown()).describe("Resource attributes."),
         relationships: z
           .record(z.string(), z.unknown())
           .optional()
           .describe("JSON:API relationships object."),
+        confirm: confirmField,
       },
     },
-    async ({ type, attributes, relationships }) => {
+    async ({ type, attributes, relationships, confirm }) => {
       try {
-        const data = await client.request({
+        const req = {
           method: "POST",
           path: `/${type}`,
           body: { data: { type, attributes, ...(relationships ? { relationships } : {}) } },
-        });
+        };
+        const refused = refusedManagedWrite(req.method, req.path);
+        if (refused) return refused;
+        if (!confirm) return dryRun({ ...req, path: `/api${req.path}` });
+        const data = await client.request(req);
         return result(data);
       } catch (err) {
         return errorResult(err);
@@ -274,18 +288,19 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         "and for moderation: lock/sticky a discussion, approve/hide a post, change user groups, etc. " +
         'Example: type="discussions", id="42", attributes={ isLocked: true }.',
       inputSchema: {
-        type: z.string().describe("Resource type."),
-        id: z.string().describe("Resource id."),
+        type: segmentSchema("type").describe("Resource type."),
+        id: segmentSchema("id").describe("Resource id."),
         attributes: z.record(z.string(), z.unknown()).optional().describe("Attributes to change."),
         relationships: z
           .record(z.string(), z.unknown())
           .optional()
           .describe("Relationships to change."),
+        confirm: confirmField,
       },
     },
-    async ({ type, id, attributes, relationships }) => {
+    async ({ type, id, attributes, relationships, confirm }) => {
       try {
-        const data = await client.request({
+        const req = {
           method: "PATCH",
           path: `/${type}/${id}`,
           body: {
@@ -302,7 +317,11 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
               ...(relationships ? { relationships } : {}),
             },
           },
-        });
+        };
+        const refused = refusedManagedWrite(req.method, req.path);
+        if (refused) return refused;
+        if (!confirm) return dryRun({ ...req, path: `/api${req.path}` });
+        const data = await client.request(req);
         return result(data);
       } catch (err) {
         return errorResult(err);
@@ -318,12 +337,16 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         "Delete any Flarum resource by type and id (e.g. delete a post, discussion, or user). " +
         "Irreversible. Requires appropriate permissions on the API key's user.",
       inputSchema: {
-        type: z.string().describe("Resource type."),
-        id: z.string().describe("Resource id."),
+        type: segmentSchema("type").describe("Resource type."),
+        id: segmentSchema("id").describe("Resource id."),
+        confirm: confirmField,
       },
     },
-    async ({ type, id }) => {
+    async ({ type, id, confirm }) => {
       try {
+        const refused = refusedManagedWrite("DELETE", `/${type}/${id}`);
+        if (refused) return refused;
+        if (!confirm) return dryRun({ method: "DELETE", path: `/api/${type}/${id}` }, "Irreversible: Flarum has no undo for deletes.");
         await client.request({ method: "DELETE", path: `/${type}/${id}` });
         return result({ deleted: true, type, id });
       } catch (err) {
@@ -343,20 +366,23 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
         title: z.string().describe("Discussion title."),
         content: z.string().describe("First post content (Markdown)."),
         tagIds: z.array(z.string()).optional().describe("Tag ids to attach."),
+        confirm: confirmField,
       },
     },
-    async ({ title, content, tagIds }) => {
+    async ({ title, content, tagIds, confirm }) => {
       try {
         const relationships = tagIds?.length
           ? { tags: { data: tagIds.map((id) => ({ type: "tags", id })) } }
           : undefined;
-        const data = await client.request({
+        const req = {
           method: "POST",
           path: "/discussions",
           body: {
             data: { type: "discussions", attributes: { title, content }, ...(relationships ? { relationships } : {}) },
           },
-        });
+        };
+        if (!confirm) return dryRun({ ...req, path: "/api/discussions" }, "Publishes publicly and notifies subscribers.");
+        const data = await client.request(req);
         return result(data);
       } catch (err) {
         return errorResult(err);
@@ -370,13 +396,14 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
       title: "Reply to a discussion",
       description: "Post a reply (comment) to an existing discussion by its id.",
       inputSchema: {
-        discussionId: z.string().describe("Target discussion id."),
+        discussionId: segmentSchema("discussionId").describe("Target discussion id."),
         content: z.string().describe("Reply content (Markdown)."),
+        confirm: confirmField,
       },
     },
-    async ({ discussionId, content }) => {
+    async ({ discussionId, content, confirm }) => {
       try {
-        const data = await client.request({
+        const req = {
           method: "POST",
           path: "/posts",
           body: {
@@ -386,7 +413,9 @@ export function registerTools(server: McpServer, client: FlarumClient): void {
               relationships: { discussion: { data: { type: "discussions", id: discussionId } } },
             },
           },
-        });
+        };
+        if (!confirm) return dryRun({ ...req, path: "/api/posts" }, "Publishes publicly and notifies subscribers.");
+        const data = await client.request(req);
         return result(data);
       } catch (err) {
         return errorResult(err);

@@ -12,7 +12,7 @@ Start every diagnosis with `flarum_doctor` (or `ops.sh doctor`); most rows below
 | Colours changed in the admin UI disappeared after apply | The set defines all theme keys; apply returns omitted ones to defaults | Before applying, `designset export <name>` keeps hand-made changes; doctor's `drift` warns about them |
 | Reset a key but the forum still shows the old look | `DELETE /api/settings` does not rebuild CSS | `flarum_cache_clear` (the engine does this automatically for CSS keys) |
 | Style overrides of an extension do not apply | custom_less compiles before extension LESS; equal specificity loses | Nest under `html { }` / add a parent class; last resort `!important` with a comment |
-| Font not loading / old font after update | Wrong path or 30-day nginx cache | Use `@@ASSET:fonts/x.woff2@@` (versioned URL); check `public/assets/design-sets/<set>/` exists |
+| Font not loading / old font after update | Wrong path or 30-day nginx cache | Use `@@ASSET:fonts/x.woff2@@` (versioned URL); check `public/assets/design-sets/<set>/<version>/` exists |
 | Dark-mode logo uploaded but never shown | Flarum renders the dark logo only together with a normal logo (`forum.blade.php`) | Upload a normal logo too (`image upload logo …`) |
 | Logo blurry | Flarum scales logos to 60 px height (upscales small images) | Upload a source ≥120 px high |
 | SVG/ICO logo rejected | Flarum 2 accepts only jpeg/png/gif/webp/bmp | Export PNG/WebP |
@@ -20,6 +20,6 @@ Start every diagnosis with `flarum_doctor` (or `ops.sh doctor`); most rows below
 | High-contrast scheme looks off | Core re-overrides muted/control/button colours for `-hc` | Style `html[data-theme=light-hc]` / `dark-hc` explicitly; check hc screenshots |
 | `php flarum cache:clear` fails with permission errors | Cache dirs created by php-fpm (`www-data`) are not group-writable for the shell user | Use `flarum_cache_clear` (runs as www-data via the API) |
 | `designset apply` refuses: "another design-set write is running" | Lock file from a running or crashed process | Wait; if no flarum2-ops process runs, the stale lock is replaced automatically (dead PID) |
-| Rollback verify lists image differences | Re-uploaded images always get new file names | Expected; only presence is compared. Real differences show as `action: delete` |
+| Rollback verify lists image differences | The live image is neither the snapshot's nor the copy a rollback to it uploaded | Run the rollback again (it re-uploads once and records the new file in `restored.json`) |
 | Whole forum 500 after enabling an extension | Incompatible extension / failed migration | `php flarum extension:disable <id>` then `php flarum cache:clear` (as the web user if needed); see storage/logs/flarum-YYYY-MM-DD.log |
 | Screenshots fail: "python playwright is not installed" | Wrong Python | Set `FLARUM2_OPS_PYTHON` to a `python3` that has Playwright and its Chromium installed |

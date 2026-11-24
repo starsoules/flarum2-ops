@@ -16,7 +16,9 @@ Consequences:
   (nest under `html { … }`), not by `!important`; keep `!important` for inline styles or extension rules that
   use it themselves, and add a comment saying which rule it beats.
 - custom_less applies to the **forum only**: not the admin panel, not the per-locale CSS.
-- Saving custom_less (or a theme colour) rebuilds the forum CSS by itself; a reset (DELETE) does not.
+- Saving custom_less (or a theme colour) with a value marks the forum CSS dirty and the next page request
+  rebuilds it (core `ValidateCustomLess`); a reset (DELETE) or saving NULL does not, so the engine clears the cache
+  then.
 
 ## 2. The three layers, in order of robustness
 

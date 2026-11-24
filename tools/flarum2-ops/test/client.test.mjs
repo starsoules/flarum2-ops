@@ -116,3 +116,68 @@ test("throws FlarumError carrying status and parsed body on non-2xx", async () =
     },
   );
 });
+
+test("a credential with a line break or space is refused without ever showing it", async () => {
+  const { loadToken } = await import("../dist/config.js");
+  const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const secret = "s3cr3t-token-value";
+  const cfg = { tokenFile: "/nonexistent" };
+  for (const bad of [`${secret}\r\nX-Evil: 1`, `${secret} extra`]) {
+    assert.throws(() => loadToken(cfg, { FLARUM_API_KEY: bad }), (e) => /not allowed in an HTTP header/.test(e.message) && !e.message.includes(secret));
+    assert.throws(() => new FlarumClient({ baseUrl: "http://forum.test", apiKey: bad }), (e) => !e.message.includes(secret));
+  }
+  const dir = mkdtempSync(join(tmpdir(), "flarum2-ops-tok-"));
+  const file = join(dir, "token");
+  writeFileSync(file, `${secret}\nsecond-line\n`);
+  chmodSync(file, 0o600);
+  assert.throws(() => loadToken({ tokenFile: file }, {}), (e) => /token file/.test(e.message) && !e.message.includes(secret));
+  writeFileSync(file, `${secret}\n`); // a trailing newline alone is fine
+  assert.equal(loadToken({ tokenFile: file }, {}).token, secret);
+});
+
+test("public_assets_subdir must be a single folder name", async () => {
+  const { loadConfig } = await import("../dist/config.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "flarum2-ops-cfg-"));
+  const file = join(dir, "forum.json");
+  for (const bad of ["", "..", "a/b", "../x"]) {
+    writeFileSync(file, JSON.stringify({ base_url: "http://forum.test", public_assets_subdir: bad }));
+    assert.throws(() => loadConfig({ FLARUM2_OPS_CONFIG: file }), /public_assets_subdir/, JSON.stringify(bad));
+  }
+  writeFileSync(file, JSON.stringify({ base_url: "http://forum.test", public_assets_subdir: "themes_2" }));
+  assert.equal(loadConfig({ FLARUM2_OPS_CONFIG: file }).publicAssetsSubdir, "themes_2");
+});
+
+test("paths with control characters never reach the network (tab/CR/LF vanish before dot segments are resolved)", async () => {
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u) => (sent.push(String(u)), new Response("{}", { status: 200 }));
+  try {
+    const c = new FlarumClient({ baseUrl: "http://forum.test/forum", apiKey: "abcdef123456" });
+    for (const p of ["/.\t./.\t./forum/api/settings", "/sett\nings", "/a b", "/.\r./x"]) {
+      await assert.rejects(() => c.raw({ method: "POST", path: p, body: {} }), /control characters|outside the API root/, JSON.stringify(p));
+    }
+    assert.equal(sent.length, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("redirects are never followed (a 307 would resend the body, e.g. the login password, to another host)", async () => {
+  const { startMockFlarum, makeForumRoot } = await import("./helpers/mock-flarum.mjs");
+  const mock = await startMockFlarum({ forumRoot: makeForumRoot() });
+  const elsewhere = await startMockFlarum({ forumRoot: makeForumRoot() });
+  try {
+    mock.behaviour.redirectTo = elsewhere.base;
+    const c = new FlarumClient({ baseUrl: mock.base, apiKey: "abcdef123456" });
+    await assert.rejects(() => c.raw({ method: "POST", path: "/token", body: { identification: "admin", password: "pw-secret" } }), /307 with a redirect[\s\S]*not followed/);
+    assert.equal(elsewhere.requests.length, 0, "nothing reached the other host");
+  } finally {
+    await mock.close();
+    await elsewhere.close();
+  }
+});

@@ -115,3 +115,15 @@ test("flarum_docs_list parses the sitemap, keeps /2.x/ pages, and filters", asyn
   const filtered = JSON.parse((await call(t.get("flarum_docs_list"), { filter: "extend" })).content[0].text);
   assert.deepEqual(filtered.pages.map((p) => p.path), ["extend/api"]);
 });
+
+test("flarum_docs_get refuses pages that would leave the docs folder", async () => {
+  routeFetch(() => ({ body: "# x" }));
+  const t = register();
+  for (const page of ["../../../../x/y/main/z", "extend/../../secret", "a//b", "./x"]) {
+    const res = await call(t.get("flarum_docs_get"), { page });
+    assert.equal(res.isError, true, page);
+  }
+  assert.equal(calls.length, 0);
+  const ok = await call(t.get("flarum_docs_get"), { page: "extend/api" });
+  assert.notEqual(ok.isError, true);
+});

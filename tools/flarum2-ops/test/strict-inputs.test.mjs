@@ -35,7 +35,7 @@ test("valid arguments still parse, with defaults applied", () => {
     content: "c",
     tagIds: ["2", "19"],
   });
-  assert.deepEqual(discussion, { title: "t", content: "c", tagIds: ["2", "19"] });
+  assert.deepEqual(discussion, { title: "t", content: "c", tagIds: ["2", "19"], confirm: false });
 
   // Defaults and clamps survive the wrapping.
   const list = t.get("flarum_list").cfg.inputSchema.parse({ type: "posts" });
@@ -99,7 +99,7 @@ test("a real server rejects an unknown parameter over the wire", async () => {
   const { tools } = await client.listTools();
   const create = tools.find((t) => t.name === "flarum_create_discussion");
   assert.equal(create.inputSchema.additionalProperties, false);
-  assert.deepEqual(Object.keys(create.inputSchema.properties).sort(), ["content", "tagIds", "title"]);
+  assert.deepEqual(Object.keys(create.inputSchema.properties).sort(), ["confirm", "content", "tagIds", "title"]);
 
   const res = await client
     .callTool({ name: "flarum_create_discussion", arguments: { title: "t", content: "c", tags: ["announcements"] } })

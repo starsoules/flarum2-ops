@@ -34,12 +34,14 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 TEMPLATE_DIR="${SCRIPT_DIR}/../assets/theme-extension-template"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-# Forum root: $FLARUM_ROOT, else forum_root from the repo's forum.json.
-if [[ -z "${FLARUM_ROOT:-}" && -f "${REPO_ROOT}/forum.json" ]]; then
-    FLARUM_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("forum_root",""))' "${REPO_ROOT}/forum.json")"
+# Forum root: $FLARUM_ROOT, else forum_root from $FLARUM2_OPS_CONFIG or the repo's forum.json ("~" expanded, as the
+# engine does). python3 -I: never import modules from the current directory.
+CONFIG_FILE="${FLARUM2_OPS_CONFIG:-${REPO_ROOT}/forum.json}"
+if [[ -z "${FLARUM_ROOT:-}" && -f "${CONFIG_FILE}" ]]; then
+    FLARUM_ROOT="$(python3 -I -c 'import json,os,sys; print(os.path.expanduser(json.load(open(sys.argv[1])).get("forum_root","")))' "${CONFIG_FILE}")"
 fi
 if [[ -z "${FLARUM_ROOT:-}" || ! -f "${FLARUM_ROOT}/flarum" ]]; then
-    printf 'Cannot find the Flarum root (set FLARUM_ROOT or forum_root in %s/forum.json)\n' "${REPO_ROOT}" >&2
+    printf 'Cannot find the Flarum root (set FLARUM_ROOT or forum_root in %s)\n' "${CONFIG_FILE}" >&2
     exit 1
 fi
 TARGET_DIR="${FLARUM_ROOT}/packages/${VENDOR}/flarum-${PACKAGE}"
@@ -57,7 +59,7 @@ fi
 mkdir -p "${TARGET_DIR}"
 cp -R "${TEMPLATE_DIR}/." "${TARGET_DIR}/"
 
-python3 - "${TARGET_DIR}" "${VENDOR}" "${PACKAGE}" <<'PY'
+python3 -I - "${TARGET_DIR}" "${VENDOR}" "${PACKAGE}" <<'PY'
 from pathlib import Path
 import sys
 

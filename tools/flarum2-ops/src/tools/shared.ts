@@ -7,6 +7,48 @@
 
 import { z } from "zod";
 import { FlarumError } from "../flarum-client.js";
+import { managedWrite } from "../policy.js";
+
+/** Every mutating tool takes this: without it the tool is a dry run that sends nothing. */
+export const confirmField = z
+  .boolean()
+  .optional()
+  .default(false)
+  .describe("false (default) = dry run that changes nothing. Set true only after the user approved the dry-run result.");
+
+/** Dry-run result of a write tool: exactly what would be sent, and nothing was. */
+export function dryRun(wouldSend: unknown, warning?: string) {
+  return result({
+    dryRun: true,
+    wouldSend,
+    ...(warning ? { warning } : {}),
+    next: "Nothing was sent. Show this to the user and call again with confirm: true only after they approve.",
+  });
+}
+
+/** MCP tool that owns writes to this API path (see policy.managedWrite), if any. */
+export function managedWriteTool(normalisedPath: string): string | undefined {
+  return managedWrite(normalisedPath)?.mcp;
+}
+
+/** Error result when a generic write would reach an endpoint that has its own policy-checked tool. */
+export function refusedManagedWrite(method: string, apiPath: string) {
+  const tool = managedWriteTool(apiPath);
+  if (!tool) return undefined;
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: `${method} /api${apiPath} is refused here: use ${tool} (key policy, snapshot, read-back).` }],
+  };
+}
+
+/**
+ * One URL path segment (resource type, id, extension id). Generic tools build paths from these, so a "/" or
+ * ".." would let them reach other routes (e.g. type "extensions" + id "../settings").
+ */
+export const segmentSchema = (what: string) =>
+  z
+    .string()
+    .regex(/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/, `${what} must be a single path segment (letters, digits, . _ -)`);
 
 /** Render any value as a tool result, surfacing Flarum API errors cleanly. */
 export function result(data: unknown) {
@@ -79,7 +121,8 @@ export const DEFAULT_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   flarum_whoami: RO,
   flarum_request: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   flarum_create: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  flarum_update: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Overwrites attributes (and can change a user's groups, email or password): destructive.
+  flarum_update: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   flarum_delete: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   flarum_create_discussion: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   flarum_reply: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

@@ -30,6 +30,7 @@ from this skill's directory). Both run the same engine. Every mutating command i
 | Try on (apply → screenshots → rollback) | `designset_preview` | `designset preview <n> --confirm` |
 | Make it live | `designset_apply` | `designset apply <n> --confirm` |
 | Undo | `designset_rollback` | `designset rollback [snapshot] --confirm` |
+| Delete old snapshots | `designset_prune_snapshots` | `designset prune-snapshots [--keep N] --confirm` |
 | Screenshots of the live forum | `designset_screenshot` | `designset screenshot [n]` |
 | Compare sets visually | `designset_gallery` | `designset gallery` → `design-sets/gallery.html` |
 | Logo / dark logo / email logo / favicon | `flarum_upload_image` / `flarum_delete_image` | `image upload <kind> <file>` |
@@ -49,9 +50,9 @@ the token 0600 in `~/.config/flarum2/token`. Never ask for, print or store the p
 |---|---|
 | Reads, doctor, validate, diff, dry runs, screenshots, gallery, new/export set (local files) | Do it |
 | `preview`, `apply`, `rollback` | Show the dry-run plan, get a yes **for that set/snapshot**, then confirm |
-| Extension enable/disable (runs DB migrations), permissions, content writes, tag create/delete/reorder, settings reset outside rollback | Separate, explicit approval each time; never bundle with a design change |
+| Extension enable/disable (runs DB migrations), permissions, content writes, tag create/delete/reorder, settings reset outside rollback, deleting snapshots (`prune-snapshots` removes rollback points) | Separate, explicit approval each time; never bundle with a design change |
 | Protected keys (mail_*, maintenance_mode, drivers, secrets) | Only with `allowProtected` + explicit approval |
-| Extension uninstall, DB writes, composer, web server, file permissions | Not this skill: follow the project's rules (ask first) |
+| Extension uninstall (`flarum_ext_remove` exists only with `FLARUM_EXTENSIONS=1`), DB writes, composer, web server, file permissions | Not this skill: follow the project's rules (ask first) |
 
 ## Recipes
 
@@ -71,7 +72,7 @@ the token 0600 in `~/.config/flarum2/token`. Never ask for, print or store the p
 
 **3. Something looks wrong / undo**
 `flarum_doctor` → if `custom_less_error` is set or drift is reported, read `references/troubleshooting.md`.
-To undo: `designset_rollback` (dry run shows what differs) → approval → `confirm:true` (default: latest snapshot).
+To undo: `designset_rollback` (dry run shows what differs) → approval → `confirm:true` (default: the last pre-write snapshot; confirm with the id the dry run shows).
 
 For a design hand-off to Claude Design or a human designer, use `references/design-handoff.md`.
 When the API + LESS cannot express a change (new components, JS behaviour), use `references/theme-extension.md`.
@@ -79,7 +80,8 @@ When the API + LESS cannot express a change (new components, JS behaviour), use 
 ## Report format
 
 After any write, report in this order: what changed (set/keys/images/tags), snapshot id + exact rollback
-command, verification result (read-back, `custom_less_error`, health, screenshot problems), the operations.md
+command, verification result (read-back, `custom_less_error`, health incl. its warnings such as new log errors, screenshot
+problems), the operations.md
 entry you appended. After a dry run: the plan and the single question you need answered.
 Claims about how something looks need a screenshot behind them (`designset_screenshot`/preview); otherwise
 say it is untested. State the breakpoint scope of every CSS effect (e.g. "desktop only"). Give times in the

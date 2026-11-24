@@ -9,7 +9,8 @@
  * forum's own config.php.
  *
  * Guarantees:
- *  - SELECT only; MySQL/MariaDB sessions are switched to READ ONLY.
+ *  - SELECT only; MySQL/MariaDB and PostgreSQL sessions are switched to READ ONLY,
+ *    SQLite connections to query_only.
  *  - Never prints config.php, the DSN, the DB user or the password.
  *  - Secret-looking keys are never output with their value (state "redacted").
  *
@@ -31,10 +32,12 @@ function out(array $data, int $code = 0): void
 function is_secret_key(string $key): bool
 {
     // Mail transport credentials and anything that looks like a credential.
-    if (preg_match('/^mail_/', $key) && !in_array($key, ['mail_driver', 'mail_format', 'mail_from'], true)) {
+    // Lower-cased: the settings table compares keys case-insensitively (utf8mb4_unicode_ci).
+    $lower = strtolower($key);
+    if (preg_match('/^mail_/', $lower) && !in_array($lower, ['mail_driver', 'mail_format', 'mail_from'], true)) {
         return true;
     }
-    return (bool) preg_match('/(pass(word)?|secret|token|api_?key|private|credential|(^|[._-])key$)/i', $key);
+    return (bool) preg_match('/(pass(word)?|pwd|secret|token|api_?key|access_?key|s3_?key|private|credential|dsn|webhook|jwt|salt|bearer|(^|[._-])key$)/i', $key) || (bool) preg_match('/[a-z0-9]Key(Id)?$/', $key);
 }
 
 $root = $argv[1] ?? '';
@@ -75,7 +78,16 @@ try {
             $dsn = sprintf('pgsql:host=%s;port=%s;dbname=%s', $db['host'] ?? 'localhost', $db['port'] ?? 5432, $db['database']);
             break;
         case 'sqlite':
-            $dsn = 'sqlite:' . $db['database'];
+            // Like core's DatabaseServiceProvider: a path that does not exist as given is relative to the forum root.
+            $sqlitePath = (string) $db['database'];
+            if (!file_exists($sqlitePath)) {
+                $sqlitePath = $root . '/' . $sqlitePath;
+            }
+            if (!is_file($sqlitePath)) {
+                // PDO would silently create an empty database file here.
+                out(['error' => 'sqlite database file not found'], 1);
+            }
+            $dsn = 'sqlite:' . $sqlitePath;
             break;
         default:
             out(['error' => "unsupported database driver: $driver"], 1);
@@ -86,17 +98,31 @@ try {
     ]);
     if ($driver === 'mysql' || $driver === 'mariadb') {
         $pdo->exec('SET SESSION TRANSACTION READ ONLY');
+    } elseif ($driver === 'pgsql') {
+        $pdo->exec('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY');
+    } elseif ($driver === 'sqlite') {
+        $pdo->exec('PRAGMA query_only = ON');
     }
 } catch (Throwable $e) {
     // PDO messages never contain the password; strip DSN-like fragments anyway.
-    out(['error' => 'database connection failed: ' . preg_replace('/(host|dbname|unix_socket)=[^;\s]+/', '$1=***', $e->getMessage())], 1);
+    $msg = preg_replace('/(host|dbname|unix_socket)=[^;\s]+/', '$1=***', $e->getMessage());
+    // "Access denied for user 'name'@'host'" / 'role "name" does not exist': never show the DB user either.
+    $msg = preg_replace("/for user '[^']*'(@'[^']*')?/", "for user '***'", $msg);
+    $msg = preg_replace('/(role|user|database) "[^"]*"/', '$1 "***"', $msg);
+    out(['error' => 'database connection failed: ' . $msg], 1);
 }
 
-$table = $prefix . 'settings';
+// Identifier quoting differs per driver: backticks are MySQL-only (PostgreSQL rejects them).
+$q = static function (string $id) use ($driver): string {
+    return ($driver === 'mysql' || $driver === 'mariadb') ? "`$id`" : '"' . $id . '"';
+};
+$table = $q($prefix . 'settings');
+$key = $q('key');
+$value = $q('value');
 
 try {
     if ($mode === 'keys') {
-        $rows = $pdo->query("SELECT `key` FROM `$table` ORDER BY `key`")->fetchAll();
+        $rows = $pdo->query("SELECT $key FROM $table ORDER BY $key")->fetchAll();
         $keys = [];
         foreach ($rows as $r) {
             $keys[] = ['key' => $r['key'], 'secret' => is_secret_key($r['key'])];
@@ -106,13 +132,15 @@ try {
 
     if ($mode === 'permissions') {
         $names = array_values(array_filter((array) ($req['names'] ?? []), 'is_string'));
-        $sql = "SELECT `permission`, `group_id` FROM `{$prefix}group_permission`";
+        $perm = $q('permission');
+        $group = $q('group_id');
+        $sql = "SELECT $perm, $group FROM " . $q($prefix . 'group_permission');
         $params = [];
         if ($names) {
-            $sql .= ' WHERE `permission` IN (' . implode(',', array_fill(0, count($names), '?')) . ')';
+            $sql .= " WHERE $perm IN (" . implode(',', array_fill(0, count($names), '?')) . ')';
             $params = $names;
         }
-        $stmt = $pdo->prepare($sql . ' ORDER BY `permission`, `group_id`');
+        $stmt = $pdo->prepare($sql . " ORDER BY $perm, $group");
         $stmt->execute($params);
         $perms = [];
         foreach ($stmt->fetchAll() as $r) {
@@ -130,14 +158,14 @@ try {
     $found = [];
 
     if ($keys) {
-        $stmt = $pdo->prepare("SELECT `key`, `value` FROM `$table` WHERE `key` IN (" . implode(',', array_fill(0, count($keys), '?')) . ')');
+        $stmt = $pdo->prepare("SELECT $key, $value FROM $table WHERE $key IN (" . implode(',', array_fill(0, count($keys), '?')) . ')');
         $stmt->execute($keys);
         foreach ($stmt->fetchAll() as $r) {
             $found[$r['key']] = $r['value'];
         }
     }
     foreach ($prefixes as $p) {
-        $stmt = $pdo->prepare("SELECT `key`, `value` FROM `$table` WHERE `key` LIKE ? ESCAPE '!'");
+        $stmt = $pdo->prepare("SELECT $key, $value FROM $table WHERE $key LIKE ? ESCAPE '!'");
         $stmt->execute([str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $p) . '%']);
         foreach ($stmt->fetchAll() as $r) {
             $found[$r['key']] = $r['value'];

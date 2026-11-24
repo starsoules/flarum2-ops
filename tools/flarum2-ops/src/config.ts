@@ -76,17 +76,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OpsConfig {
       : ["nginx", "php8.4-fpm", "mariadb"];
 
   const forumRoot = env.FLARUM_ROOT ?? str("forum_root");
+  // One folder name under public/assets: static files are published (and old versions removed) below it, so ""
+  // or ".." would point the engine at Flarum's own assets.
+  const publicAssetsSubdir = str("public_assets_subdir") ?? "design-sets";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(publicAssetsSubdir)) {
+    throw new Error(`public_assets_subdir must be a single folder name (letters, digits, _ -), got ${JSON.stringify(publicAssetsSubdir)}`);
+  }
   return {
     name: str("name") ?? "flarum",
     baseUrl: (env.FLARUM_URL ?? str("base_url"))?.replace(/\/+$/, ""),
     forumRoot: forumRoot ? resolve(expandHome(forumRoot)) : undefined,
     tokenFile: resolve(expandHome(env.FLARUM_TOKEN_FILE ?? str("token_file") ?? "~/.config/flarum2/token")),
     designSetsDir: rel(expandHome(env.FLARUM_DESIGN_SETS_DIR ?? str("design_sets_dir") ?? "design-sets")),
-    publicAssetsSubdir: str("public_assets_subdir") ?? "design-sets",
+    publicAssetsSubdir,
     services,
     repoRoot,
     source: hasFile ? candidate : "environment",
   };
+}
+
+/** A positive number from an environment variable, or undefined (so "abc" never becomes NaN, i.e. a 1 ms timeout). */
+export function envPositiveNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 export interface TokenInfo {
@@ -100,8 +113,23 @@ export interface TokenInfo {
  * Load the API credential. FLARUM_API_KEY (env) wins for compatibility with
  * mcp-for-flarum; otherwise the token file. The value is never logged.
  */
+/**
+ * A token is sent as `Authorization: Token <token>`: anything outside visible ASCII (a line break from a
+ * multi-line token file, a space) makes fetch throw an error whose message contains the header value, i.e. the
+ * secret. Refuse such a credential up front, with a message that never includes it.
+ */
+export function assertHeaderSafeToken(token: string, where: string): void {
+  if (!/^[\x21-\x7e]+$/.test(token)) {
+    throw new Error(`The credential from ${where} contains characters not allowed in an HTTP header (a line break or space inside it?). Fix ${where}; the value is not shown.`);
+  }
+}
+
 export function loadToken(cfg: OpsConfig, env: NodeJS.ProcessEnv = process.env): TokenInfo {
-  if (env.FLARUM_API_KEY) return { token: env.FLARUM_API_KEY.trim(), source: "env" };
+  if (env.FLARUM_API_KEY) {
+    const token = env.FLARUM_API_KEY.trim();
+    assertHeaderSafeToken(token, "FLARUM_API_KEY");
+    return { token, source: "env" };
+  }
   if (!existsSync(cfg.tokenFile)) return { source: "none" };
   const st = statSync(cfg.tokenFile);
   let warning: string | undefined;
@@ -109,6 +137,7 @@ export function loadToken(cfg: OpsConfig, env: NodeJS.ProcessEnv = process.env):
     warning = `Token file ${cfg.tokenFile} is readable by group/others (mode ${(st.mode & 0o777).toString(8)}); run: chmod 600 ${cfg.tokenFile}`;
   }
   const token = readFileSync(cfg.tokenFile, "utf8").trim();
+  if (token) assertHeaderSafeToken(token, `the token file ${cfg.tokenFile}`);
   return token ? { token, source: "file", warning } : { source: "none", warning: `Token file ${cfg.tokenFile} is empty` };
 }
 

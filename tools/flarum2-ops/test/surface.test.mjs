@@ -9,6 +9,7 @@ import { createMcpServer, clientFromEnv } from "../dist/server.js";
 import { FlarumClient } from "../dist/flarum-client.js";
 import { Ops } from "../dist/ops.js";
 import { startMockFlarum, makeForumRoot, ADMIN_TOKEN } from "./helpers/mock-flarum.mjs";
+import { cleanEnv, withCleanProcessEnv } from "./helpers/env.mjs";
 
 let mock;
 let root;
@@ -42,19 +43,15 @@ async function toolsFor(readOnly) {
   return { tools, c };
 }
 
-test("clientFromEnv is read-only unless FLARUM_MODE=write", () => {
-  const saved = { ...process.env };
-  try {
-    process.env.FLARUM_URL = "http://forum.test";
-    delete process.env.FLARUM_MODE;
+test("clientFromEnv is read-only unless FLARUM_MODE=write", async () => {
+  // Own process, so: no inherited FLARUM*/MCP_*/READ_ONLY, a throw-away config file and no real token file.
+  await withCleanProcessEnv({ FLARUM_URL: "http://forum.test" }, () => {
     assert.equal(clientFromEnv().readOnly, true);
     process.env.FLARUM_MODE = "write";
     assert.equal(clientFromEnv().readOnly, false);
     process.env.READ_ONLY = "1";
     assert.equal(clientFromEnv().readOnly, true);
-  } finally {
-    process.env = saved;
-  }
+  });
 });
 
 test("read-only server exposes ops read tools but no mutating tool", async () => {
@@ -63,7 +60,7 @@ test("read-only server exposes ops read tools but no mutating tool", async () =>
   for (const n of ["flarum_doctor", "flarum_health", "flarum_settings_get", "designset_list", "designset_diff", "designset_validate"]) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
-  for (const n of ["designset_apply", "designset_rollback", "flarum_settings_set", "flarum_upload_image", "flarum_extension_set", "flarum_create"]) {
+  for (const n of ["designset_apply", "designset_rollback", "designset_prune_snapshots", "flarum_settings_set", "flarum_upload_image", "flarum_extension_set", "flarum_create"]) {
     assert.ok(!names.includes(n), `${n} must be hidden in read-only mode`);
   }
   await c.close();
@@ -72,7 +69,7 @@ test("read-only server exposes ops read tools but no mutating tool", async () =>
 test("write server exposes the mutating tools and every tool carries annotations", async () => {
   const { tools, c } = await toolsFor(false);
   const names = tools.map((t) => t.name);
-  for (const n of ["designset_apply", "designset_preview", "designset_rollback", "flarum_settings_set", "flarum_settings_reset", "flarum_upload_image", "flarum_cache_clear", "flarum_extension_set", "flarum_permission_set"]) {
+  for (const n of ["designset_apply", "designset_preview", "designset_rollback", "designset_prune_snapshots", "flarum_settings_set", "flarum_settings_reset", "flarum_upload_image", "flarum_cache_clear", "flarum_extension_set", "flarum_permission_set"]) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
   const missing = tools.filter((t) => !t.annotations || typeof t.annotations.readOnlyHint !== "boolean").map((t) => t.name);
@@ -99,7 +96,7 @@ test("designset_apply through MCP is a dry run without confirm", async () => {
 function cli(args, env = {}) {
   return new Promise((resolve) => {
     execFile(process.execPath, [new URL("../dist/cli.js", import.meta.url).pathname, ...args], {
-      env: { ...process.env, ...env },
+      env: cleanEnv(env),
     }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
   });
 }

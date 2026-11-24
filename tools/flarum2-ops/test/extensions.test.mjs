@@ -2,13 +2,23 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { FlarumClient } from "../dist/flarum-client.js";
-import { registerExtensionTools } from "../dist/tools/extensions.js";
+import { registerExtensionTools, extensionIdOf } from "../dist/tools/extensions.js";
 
 // Same stub-server pattern as tools.test.mjs: collect registered tools and
 // drive their handlers through the tool's zod shape (applying defaults).
-function register(client) {
+// Enable/disable is delegated to Ops.extensionSet (tested against the mock forum in ops.test.mjs); a fake
+// records the delegation here.
+let toggles = [];
+const fakeOps = {
+  extensionSet: async (id, enabled, o) => {
+    toggles.push({ id, enabled, confirm: Boolean(o?.confirm) });
+    return o?.confirm ? { dryRun: false, verify: { ok: true } } : { dryRun: true, warning: "migrations" };
+  },
+};
+function register(client, ops = fakeOps) {
+  toggles = [];
   const tools = new Map();
-  registerExtensionTools({ registerTool: (name, cfg, handler) => tools.set(name, { cfg, handler }) }, client);
+  registerExtensionTools({ registerTool: (name, cfg, handler) => tools.set(name, { cfg, handler }) }, client, ops);
   return tools;
 }
 const call = (tool, raw = {}) => tool.handler(z.object(tool.cfg.inputSchema).parse(raw));
@@ -86,16 +96,16 @@ test("flarum_ext_install (sync forum) returns the install result and can auto-en
     return { body: {} };
   });
   const t = register(writeClient());
-  const res = await call(t.get("flarum_ext_install"), { package: "fof/upload", enable: true });
+  const res = await call(t.get("flarum_ext_install"), { package: "fof/upload", enable: true, confirm: true });
 
   const install = calls.find((c) => c.url.pathname === "/api/extension-manager/extensions");
   assert.equal(install.method, "POST");
   assert.deepEqual(JSON.parse(install.init.body), { data: { package: "fof/upload" } });
 
-  const enable = calls.find((c) => c.url.pathname === "/api/extensions/fof-upload");
-  assert.equal(enable.method, "PATCH");
-  assert.deepEqual(JSON.parse(enable.init.body), { enabled: true }); // flat, not JSON:API
-  assert.match(res.content[0].text, /"enabled": "fof-upload"/);
+  // The enable step goes through the verified Ops path, not a raw PATCH.
+  assert.deepEqual(toggles, [{ id: "fof-upload", enabled: true, confirm: true }]);
+  assert.equal(calls.some((c) => c.url.pathname === "/api/extensions/fof-upload"), false);
+  assert.equal(JSON.parse(res.content[0].text).enable.verify.ok, true);
 });
 
 test("flarum_ext_install (async forum) polls the task to completion", async () => {
@@ -114,19 +124,25 @@ test("flarum_ext_install (async forum) polls the task to completion", async () =
     return { body: {} };
   });
   const t = register(writeClient());
-  const res = await call(t.get("flarum_ext_install"), { package: "fof/upload" });
+  const res = await call(t.get("flarum_ext_install"), { package: "fof/upload", confirm: true });
   const out = JSON.parse(res.content[0].text);
   assert.equal(out.install.status, "success");
   assert.equal(out.install.taskId, "6");
 });
 
-test("flarum_ext_toggle issues a flat-body core PATCH", async () => {
+test("flarum_ext_toggle delegates to Ops.extensionSet (dry run, health check, read-back)", async () => {
   routeFetch(() => ({ body: {} }));
   const t = register(writeClient());
-  await call(t.get("flarum_ext_toggle"), { extensionId: "fof-upload", enabled: false });
-  assert.equal(calls[0].method, "PATCH");
-  assert.equal(calls[0].url.pathname, "/api/extensions/fof-upload");
-  assert.deepEqual(JSON.parse(calls[0].init.body), { enabled: false });
+  const dry = JSON.parse((await call(t.get("flarum_ext_toggle"), { extensionId: "fof-upload", enabled: false })).content[0].text);
+  assert.equal(dry.dryRun, true);
+  await call(t.get("flarum_ext_toggle"), { extensionId: "fof-upload", enabled: false, confirm: true });
+  assert.deepEqual(toggles, [
+    { id: "fof-upload", enabled: false, confirm: false },
+    { id: "fof-upload", enabled: false, confirm: true },
+  ]);
+  assert.equal(calls.length, 0);
+  const noOps = register(writeClient(), null);
+  assert.equal((await call(noOps.get("flarum_ext_toggle"), { extensionId: "x", enabled: true, confirm: true })).isError, true);
 });
 
 test("flarum_ext_bulk_update maps scope to the right endpoint with dryRun", async () => {
@@ -144,4 +160,59 @@ test("flarum_ext_tasks truncates long composer output", async () => {
   const res = await call(t.get("flarum_ext_tasks"), { maxOutputChars: 100 });
   assert.match(res.content[0].text, /\[truncated 8900 chars\]/);
   assert.ok(!res.content[0].text.includes(long));
+});
+
+test("composer/migration tools are dry runs without confirm; the major-update preview and reads are not", async () => {
+  routeFetch(() => ({ body: {} }));
+  const t = register(writeClient());
+  const args = {
+    flarum_ext_install: { package: "fof/upload", enable: true },
+    flarum_ext_update: { extensionId: "fof-upload" },
+    flarum_ext_remove: { extensionId: "fof-upload" },
+    flarum_ext_toggle: { extensionId: "fof-upload", enabled: true },
+    flarum_ext_bulk_update: { scope: "global" },
+    flarum_ext_configure_composer: { type: "auth", data: { bearer: { "x.test": "secret-token" } } },
+  };
+  for (const [name, a] of Object.entries(args)) {
+    const res = await call(t.get(name), a);
+    const text = res.content[0].text;
+    assert.equal(JSON.parse(text).dryRun, true, name);
+    assert.doesNotMatch(text, /secret-token/, `${name} must not echo credentials`);
+  }
+  assert.equal(calls.length, 0);
+  await call(t.get("flarum_ext_bulk_update"), { scope: "major", dryRun: true, await: false });
+  await call(t.get("flarum_ext_configure_composer"), { type: "composer" });
+  assert.equal(calls.length, 2);
+});
+
+test("extension ids are validated, so ext tools cannot walk to other routes", () => {
+  const t = register(writeClient());
+  for (const name of ["flarum_ext_update", "flarum_ext_remove", "flarum_ext_toggle"]) {
+    const s = z.object(t.get(name).cfg.inputSchema);
+    assert.equal(s.safeParse({ extensionId: "../../extensions/x", enabled: true }).success, false, name);
+    assert.equal(s.safeParse({ extensionId: "fof-upload", enabled: true }).success, true, name);
+  }
+});
+
+test("extensionIdOf builds ids like flarum/core Extension::nameToId", () => {
+  assert.equal(extensionIdOf("fof/upload"), "fof-upload");
+  assert.equal(extensionIdOf("fof/upload:^1.2"), "fof-upload");
+  assert.equal(extensionIdOf("acme/flarum-ext-foo"), "acme-foo");
+  assert.equal(extensionIdOf("acme/flarum-foo"), "acme-foo");
+  assert.equal(extensionIdOf("flarum/tags"), "flarum-tags");
+});
+
+test("the install request itself gets the tool's timeout (sync-queue forums run composer inside it)", async () => {
+  const seen = [];
+  const c = writeClient();
+  const real = c.request.bind(c);
+  c.request = async (req) => {
+    seen.push(req);
+    return real(req);
+  };
+  routeFetch(() => ({ body: { id: "fof-upload" } }));
+  const t = register(c);
+  await call(t.get("flarum_ext_install"), { package: "fof/upload", confirm: true, timeoutMs: 600000 });
+  const install = seen.find((r) => r.path === "/extension-manager/extensions");
+  assert.equal(install.timeoutMs, 600000);
 });

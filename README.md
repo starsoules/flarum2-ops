@@ -35,7 +35,7 @@ Verified against Flarum 2.0.2:
 
 - Flarum 2.0.x. Database-backed features (settings reads, snapshots, design-set apply, health) need the tools
   to run on the forum's host with read access to its `config.php`; pure API features work against any forum.
-- Node.js 18+, PHP CLI with PDO (the forum's PHP is fine).
+- Node.js 20+, PHP CLI with PDO (the forum's PHP is fine).
 - Optional: Python 3.9+ with [Playwright](https://playwright.dev/python/) and Chromium for screenshots.
 
 ## Setup
@@ -43,7 +43,7 @@ Verified against Flarum 2.0.2:
 ```bash
 git clone https://github.com/starsoules/flarum2-ops.git
 cd flarum2-ops/tools/flarum2-ops && npm ci && npm run build && cd ../..
-cp forum.example.json forum.json      # set base_url and forum_root of your forum
+cp forum.example.json forum.json      # set base_url, forum_root and the systemd units in "services"
 bash skills/flarum2-design-ops/scripts/ops.sh login    # in a terminal: admin login, password typed hidden
 bash skills/flarum2-design-ops/scripts/ops.sh doctor   # health, token, applied set
 ```
@@ -83,7 +83,7 @@ The skill's scripts find the repository through the link, so the skill works fro
 
 The server is read-only unless `FLARUM_MODE` is `write`. Even then every mutating tool is a dry run until it is
 called with `confirm: true`. Without MCP, the CLI (`skills/flarum2-design-ops/scripts/ops.sh help`) offers the
-same operations.
+admin and design-set operations; the extension-manager, docs, dev and troubleshoot tools are MCP only.
 
 ## Design-sets
 
@@ -104,12 +104,17 @@ Two examples ship with the repository: `flarum-stock` (Flarum's default look) an
 
 ## Safety model
 
-- Every write is a dry run unless confirmed, takes a snapshot first and is verified by reading it back.
+- Every write is a dry run unless confirmed. Settings and image writes, applies, previews and rollbacks take a
+  snapshot first (needs `forum_root`) and are verified by reading back; permissions return the previous groups
+  instead, and extension toggles report health plus a read-back. Content writes (posts, discussions) have no
+  snapshot.
 - Design-set writes hold a lock; a failure rolls back automatically.
 - Extension toggles (which run database migrations) and permission changes are separate tools that the skill
   always puts in front of the owner on their own.
-- The token never appears in output, logs or process arguments. The settings reader uses a read-only database
-  session and never prints credentials.
+- The token never appears in output, logs or process arguments, and API responses are masked for it and for
+  access-token values. The settings reader uses a read-only database session and never prints credentials.
+- Besides the forum, only the docs tools contact third parties (Algolia, raw.githubusercontent.com); turn them off
+  with `FLARUM_DOCS=0`. See [SECURITY.md](SECURITY.md).
 
 ## Validation
 

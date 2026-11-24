@@ -56,7 +56,7 @@ export function sniffImage(buf: Uint8Array): ImageInfo | undefined {
   return undefined;
 }
 
-export function checkUpload(buf: Uint8Array, name: string): { info: ImageInfo; warnings: string[] } {
+export function checkUpload(buf: Uint8Array, name: string): { info: ImageInfo } {
   if (buf.byteLength > MAX_UPLOAD_BYTES) {
     throw new Error(`${name} is ${(buf.byteLength / 1024).toFixed(0)} KB; Flarum accepts at most 2048 KB.`);
   }
@@ -66,11 +66,10 @@ export function checkUpload(buf: Uint8Array, name: string): { info: ImageInfo; w
     if (/<svg|<\?xml/i.test(head)) throw new Error(`${name} is SVG; Flarum 2 uploads accept only jpeg, png, gif, webp or bmp. Export a PNG/WebP.`);
     throw new Error(`${name} is not a jpeg/png/gif/webp/bmp image (ICO is not accepted either).`);
   }
-  const warnings: string[] = [];
   if (info.width && info.height && (info.width * info.height) / 1e6 > MAX_MEGAPIXELS) {
     throw new Error(`${name} is ${info.width}x${info.height} (> ${MAX_MEGAPIXELS} MP); Flarum rejects it.`);
   }
-  return { info, warnings };
+  return { info };
 }
 
 /** Kind-specific advice (Flarum resizes: logos to 60 px high WebP, favicon to 64x64 PNG). */

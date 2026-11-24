@@ -2,6 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { clientFromEnv, createMcpServer, opsFromEnv } from "./server.js";
 import { runHttp } from "./http.js";
+import { installInterruptHandling } from "./designset.js";
 
 function useHttp(): boolean {
   return process.argv.includes("--http") || process.env.MCP_TRANSPORT === "http";
@@ -16,6 +17,7 @@ async function runStdio(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  installInterruptHandling((m) => process.stderr.write(`[flarum2-ops] ${m}\n`));
   if (useHttp()) {
     await runHttp();
   } else {

@@ -29,9 +29,9 @@ The forum root comes from `FLARUM_ROOT` or `forum_root` in the repo's `forum.jso
 1. Composer path repository in the forum's `composer.json`
    (`"repositories": [{"type": "path", "url": "packages/*/*"}]`), then `composer require <vendor>/flarum-<package>:*@dev`.
    This changes `composer.json`/`composer.lock`: back them up first.
-2. Enable with `flarum_extension_set`. The extension id is `<vendor>-<package>` with any `flarum-ext-` /
-   `flarum-` prefix removed from the package part (`Extension::nameToId`), e.g. `acme/flarum-night-sky` →
-   `acme-night-sky`. Confirm in `php flarum info`.
+2. Enable with `flarum_extension_set`. The extension id is `<vendor>-<package>` with every occurrence of `flarum-ext-`
+   and then `flarum-` removed from the package part (`Extension::nameToId`, a `str_replace`, not only a prefix),
+   e.g. `acme/flarum-night-sky` → `acme-night-sky`, `acme/flarum-my-flarum-theme` → `acme-my-theme`. Confirm in `php flarum info`.
 3. JavaScript (only if needed): follow https://docs.flarum.org/extend/frontend/ for the current `js/` tooling,
    build with the package's own scripts, never edit `public/assets` or `vendor/`.
 4. Verify: `flarum_doctor`, `designset_screenshot`, browser console clean.

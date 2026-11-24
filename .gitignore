@@ -1,12 +1,20 @@
 # local configuration (paths of your forum)
 forum.json
 # generated / per-machine state
+# design sets: only the bundled examples are tracked (exports contain a live forum's header/footer)
+design-sets/*
+!design-sets/flarum-stock/
+!design-sets/slate-amber/
 design-sets/_snapshots/
 design-sets/_live-screenshots/
 design-sets/*/screenshots/
 design-sets/gallery.html
 design-sets/.applied.json
+design-sets/.applied-*.json
 design-sets/.lock
+design-sets/.lock.stale-*
+design-sets/.interrupted
+design-sets/**/*.tmp-*
 # private evaluation material
 evals/
 # build output and dependencies

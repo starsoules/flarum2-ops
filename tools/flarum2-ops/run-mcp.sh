@@ -12,7 +12,7 @@ export FLARUM_EXTENSIONS="${FLARUM_EXTENSIONS:-0}"
 # Screenshots need a Python with Playwright: use the first python3 in PATH that can import it.
 if [[ -z "${FLARUM2_OPS_PYTHON:-}" ]]; then
     while read -r py; do
-        if "$py" -c "import playwright" >/dev/null 2>&1; then export FLARUM2_OPS_PYTHON="$py"; break; fi
+        if "$py" -I -c "import playwright" >/dev/null 2>&1; then export FLARUM2_OPS_PYTHON="$py"; break; fi
     done < <(type -ap python3)
 fi
 exec node "$pkg/dist/index.js"

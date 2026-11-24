@@ -30,7 +30,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { FlarumClient } from "../flarum-client.js";
-import { result, errorResult } from "./shared.js";
+import type { Ops } from "../ops.js";
+import { result, errorResult, confirmField, dryRun as dryRunResult } from "./shared.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -148,6 +149,17 @@ const asyncOpts = {
 const POLL_INTERVAL_MS = 2000;
 
 /**
+ * Extension id of a composer package, exactly as flarum/core Extension::nameToId builds it: "vendor-package" with
+ * "flarum-ext-" / "flarum-" removed from the package part ("acme/flarum-ext-foo" -> "acme-foo").
+ */
+export function extensionIdOf(pkg: string): string {
+  const name = pkg.split(":")[0];
+  const [vendor, rest] = name.split(/\/(.*)/s);
+  const pack = (rest ?? name).replace(/flarum-ext-|flarum-/g, "");
+  return `${vendor}-${pack}`;
+}
+
+/**
  * Dispatch a manager action and, if it came back async (202 processing), wait
  * for the resulting task. Returns the raw sync result otherwise.
  */
@@ -157,7 +169,9 @@ async function dispatchManaged(
   o: { await: boolean; timeoutMs: number; maxOutputChars: number },
 ): Promise<unknown> {
   const sinceId = o.await ? await latestTaskId(client) : 0;
-  const res = await client.request<{ processing?: boolean } | unknown>(req);
+  // A sync-queue forum runs composer inside this request: allow as long as for awaiting an async task, or the
+  // tool reports a timeout while composer keeps running (and a retry would start a second run).
+  const res = await client.request<{ processing?: boolean } | unknown>({ ...req, timeoutMs: o.timeoutMs });
 
   const processing = res && typeof res === "object" && (res as { processing?: boolean }).processing;
   if (!processing) {
@@ -174,7 +188,11 @@ async function dispatchManaged(
   });
 }
 
-export function registerExtensionTools(server: McpServer, client: FlarumClient): void {
+/**
+ * `ops` carries extension enable/disable: Ops.extensionSet adds the migration warning, a health check and a
+ * read-back, so there is one verified toggle path (also used by install's enable step), not a raw PATCH here.
+ */
+export function registerExtensionTools(server: McpServer, client: FlarumClient, ops?: Ops): void {
   // ---- Read tools: safe in read-only mode (GET only) ----
 
   server.registerTool(
@@ -311,10 +329,20 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
               "(recovery is manual). Prefer installing, verifying compatibility, then enabling separately.",
           ),
         ...asyncOpts,
+        confirm: confirmField,
       },
     },
-    async ({ package: pkg, enable, await: doAwait, timeoutMs, maxOutputChars }) => {
+    async ({ package: pkg, enable, await: doAwait, timeoutMs, maxOutputChars, confirm }) => {
       try {
+        if (!confirm) {
+          return dryRunResult(
+            [
+              { method: "POST", path: "/api/extension-manager/extensions", body: { data: { package: pkg } } },
+              ...(enable ? [{ method: "PATCH", path: `/api/extensions/${extensionIdOf(pkg)}`, body: { enabled: true } }] : []),
+            ],
+            "Runs composer on the server; enabling also runs the extension's database migrations, which disabling does not roll back. Take a DB backup first.",
+          );
+        }
         const outcome = await dispatchManaged(
           client,
           { method: "POST", path: "/extension-manager/extensions", body: { data: { package: pkg } } },
@@ -327,15 +355,12 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
         const installed = o.id || o.status === "success";
         if (enable && installed) {
           // Extension id is the dotted form; derive it from the package name.
-          const extensionId = o.id ?? pkg.split(":")[0].replace("/", "-");
-          // Core enable endpoint is NOT JSON:API: flat { enabled: true } body
-          // (core reads (bool)(int) of body.enabled; name comes from the path).
-          await client.request({
-            method: "PATCH",
-            path: `/extensions/${extensionId}`,
-            body: { enabled: true },
-          });
-          return result({ install: outcome, enabled: extensionId });
+          const extensionId = o.id ?? extensionIdOf(pkg);
+          if (!ops) {
+            return result({ install: outcome, enabled: false, note: `Enable separately with flarum_extension_set (${extensionId}).` });
+          }
+          // Same verified path as flarum_extension_set (the user already approved enable=true with confirm).
+          return result({ install: outcome, enable: await ops.extensionSet(extensionId, true, { confirm: true }) });
         }
         return result({ install: outcome, enabled: false });
       } catch (err) {
@@ -353,13 +378,20 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
         '`composer update` within the existing constraint; "hard" runs `composer require pkg:*` to jump ' +
         "to the latest version (can break version locks). Use flarum_ext_search to find the id.",
       inputSchema: {
-        extensionId: z.string().describe('Dotted extension id, e.g. "fof-upload".'),
+        extensionId: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "extension id, e.g. fof-upload").describe('Extension id, e.g. "fof-upload".'),
         updateMode: z.enum(["soft", "hard"]).default("soft"),
         ...asyncOpts,
+        confirm: confirmField,
       },
     },
-    async ({ extensionId, updateMode, await: doAwait, timeoutMs, maxOutputChars }) => {
+    async ({ extensionId, updateMode, await: doAwait, timeoutMs, maxOutputChars, confirm }) => {
       try {
+        if (!confirm) {
+          return dryRunResult(
+            { method: "PATCH", path: `/api/extension-manager/extensions/${extensionId}`, body: { data: { updateMode } } },
+            "Runs composer on the server and may run new migrations. Take a DB backup first.",
+          );
+        }
         const outcome = await dispatchManaged(
           client,
           {
@@ -384,12 +416,16 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
         'Uninstall an extension by its dotted id (runs composer remove server-side). "fof-upload". ' +
         "Irreversible without reinstalling. Dependencies required by other extensions cannot be removed.",
       inputSchema: {
-        extensionId: z.string().describe('Dotted extension id, e.g. "fof-upload".'),
+        extensionId: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "extension id, e.g. fof-upload").describe('Extension id, e.g. "fof-upload".'),
         ...asyncOpts,
+        confirm: confirmField,
       },
     },
-    async ({ extensionId, await: doAwait, timeoutMs, maxOutputChars }) => {
+    async ({ extensionId, await: doAwait, timeoutMs, maxOutputChars, confirm }) => {
       try {
+        if (!confirm) {
+          return dryRunResult({ method: "DELETE", path: `/api/extension-manager/extensions/${extensionId}` }, "Uninstalls via composer; irreversible without reinstalling.");
+        }
         const outcome = await dispatchManaged(
           client,
           { method: "DELETE", path: `/extension-manager/extensions/${extensionId}` },
@@ -410,19 +446,16 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
         "Enable or disable an already-installed extension via Flarum core (no composer; instant). " +
         'Example: extensionId="fof-upload", enabled=false to disable. Disabling does not uninstall.',
       inputSchema: {
-        extensionId: z.string().describe('Dotted extension id, e.g. "fof-upload".'),
+        extensionId: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "extension id, e.g. fof-upload").describe('Extension id, e.g. "fof-upload".'),
         enabled: z.boolean().describe("true to enable, false to disable."),
+        confirm: confirmField,
       },
     },
-    async ({ extensionId, enabled }) => {
+    async ({ extensionId, enabled, confirm }) => {
       try {
-        // Core endpoint, flat body (not JSON:API): core reads (bool)(int) body.enabled.
-        await client.request({
-          method: "PATCH",
-          path: `/extensions/${extensionId}`,
-          body: { enabled },
-        });
-        return result({ extensionId, enabled });
+        if (!ops) throw new Error("flarum_ext_toggle needs the ops engine (forum.json); it delegates to flarum_extension_set.");
+        // Dry run, warning, health check and read-back all come from Ops.extensionSet.
+        return result(await ops.extensionSet(extensionId, enabled, { confirm }));
       } catch (err) {
         return errorResult(err);
       }
@@ -468,9 +501,10 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
           .default(false)
           .describe('For scope="major": preview without applying.'),
         ...asyncOpts,
+        confirm: confirmField.describe('false (default) = dry run. Not needed for scope="major" with dryRun (a server-side preview).'),
       },
     },
-    async ({ scope, dryRun, await: doAwait, timeoutMs, maxOutputChars }) => {
+    async ({ scope, dryRun, await: doAwait, timeoutMs, maxOutputChars, confirm }) => {
       try {
         const path =
           scope === "minor"
@@ -479,6 +513,9 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
               ? "/extension-manager/major-update"
               : "/extension-manager/global-update";
         const body = scope === "major" ? { data: { dryRun: dryRun ? 1 : 0 } } : undefined;
+        if (!confirm && !(scope === "major" && dryRun)) {
+          return dryRunResult({ method: "POST", path: `/api${path}`, body }, "Runs composer update for many packages at once. Take a DB and file backup first.");
+        }
         const outcome = await dispatchManaged(
           client,
           { method: "POST", path, body },
@@ -508,10 +545,17 @@ export function registerExtensionTools(server: McpServer, client: FlarumClient):
             'For composer: { "minimum-stability": "stable", "repositories": [...] }. ' +
               "For auth: nested { http-basic|bearer: { host: token } }. Omit to read only.",
           ),
+        confirm: confirmField.describe("Only when `data` is given: false (default) = dry run."),
       },
     },
-    async ({ type, data }) => {
+    async ({ type, data, confirm }) => {
       try {
+        if (data && !confirm) {
+          return dryRunResult(
+            { method: "POST", path: "/api/extension-manager/composer", body: { type, data: type === "auth" ? "(credentials, not echoed)" : data } },
+            "Changes the forum's composer configuration.",
+          );
+        }
         const res = await client.request({
           method: "POST",
           path: "/extension-manager/composer",

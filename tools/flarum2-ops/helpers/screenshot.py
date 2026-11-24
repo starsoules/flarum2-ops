@@ -18,6 +18,13 @@ palettes. Read-only: it only loads pages as a guest.
 import json
 import sys
 import time
+import os
+from urllib.parse import urlsplit
+
+# The browser renders untrusted pages (a shared set's header/footer, third-party scripts) as the user who can read
+# the forum config and the API token: keep Chromium's sandbox on. Containers without user namespaces can turn it
+# off with FLARUM2_OPS_CHROMIUM_SANDBOX=0.
+SANDBOX = os.environ.get("FLARUM2_OPS_CHROMIUM_SANDBOX", "1") not in ("0", "false", "no", "off")
 
 
 def main() -> int:
@@ -35,6 +42,17 @@ def main() -> int:
         }))
         return 1
 
+    if req.get("probe"):
+        # Pre-flight for preview: can a browser start at all? No page is loaded.
+        try:
+            with sync_playwright() as p:
+                p.chromium.launch(headless=True, chromium_sandbox=SANDBOX).close()
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"error": f"Chromium could not be started by Playwright: {str(exc)[:300]}"}))
+            return 1
+        print(json.dumps({"ok": True, "probe": True}))
+        return 0
+
     base = req["base_url"].rstrip("/")
     pages = req.get("pages") or ["/"]
     schemes = req.get("schemes") or ["light", "dark"]
@@ -44,7 +62,7 @@ def main() -> int:
     shots = []
     problems = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, chromium_sandbox=SANDBOX)
         try:
             for vw in viewports:
                 for scheme in schemes:
@@ -67,6 +85,10 @@ def main() -> int:
                         console_errors.clear()
                         failed.clear()
                         url = base + path
+                        # Only forum pages: "@evil/x" or "//evil" would turn base + path into another host (SSRF).
+                        if not path.startswith("/") or path.startswith("//") or urlsplit(url).netloc != urlsplit(base).netloc:
+                            problems.append(f"{path!r}: not a path on the forum, skipped")
+                            continue
                         try:
                             page.goto(url, wait_until="networkidle", timeout=45000)
                         except Exception as exc:  # noqa: BLE001 - report and continue

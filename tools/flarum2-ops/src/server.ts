@@ -8,7 +8,7 @@ import { registerTroubleshootTool } from "./tools/troubleshoot.js";
 import { registerExtensionPrompts, registerTroubleshootPrompts } from "./prompts.js";
 import { withStrictInputs } from "./tools/shared.js";
 import { registerOpsTools } from "./tools/ops-tools.js";
-import { loadConfig, loadToken } from "./config.js";
+import { envPositiveNumber, loadConfig, loadToken } from "./config.js";
 import { Ops } from "./ops.js";
 import { VERSION, DEFAULT_USER_AGENT } from "./version.js";
 
@@ -76,7 +76,7 @@ export function buildInstructions(caps: {
  */
 export function clientFromEnv(): FlarumClient {
   const cfg = loadConfig();
-  const baseUrl = process.env.FLARUM_URL || cfg.baseUrl;
+  const baseUrl = cfg.baseUrl; // loadConfig already applied FLARUM_URL
   if (!baseUrl) {
     process.stderr.write(
       "[flarum2-ops] No forum URL. Set FLARUM_URL or base_url in forum.json.\n",
@@ -95,7 +95,7 @@ export function clientFromEnv(): FlarumClient {
     apiKey: token.token,
     userId: process.env.FLARUM_USER_ID,
     userAgent: process.env.FLARUM_USER_AGENT || DEFAULT_USER_AGENT,
-    timeoutMs: process.env.FLARUM_TIMEOUT ? Number(process.env.FLARUM_TIMEOUT) : undefined,
+    timeoutMs: envPositiveNumber(process.env.FLARUM_TIMEOUT),
     readOnly,
   });
 }
@@ -175,8 +175,10 @@ export function createMcpServer(client: FlarumClient, ops?: Ops): McpServer {
 
   registerTools(reg, client);
   if (ops) registerOpsTools(reg, ops);
-  if (extensions) registerExtensionTools(reg, client);
-  if (docs) registerDocsTools(reg, process.env.FLARUM_USER_AGENT || DEFAULT_USER_AGENT);
+  if (extensions) registerExtensionTools(reg, client, ops);
+  // Docs requests go to third parties (Algolia, raw.githubusercontent.com): never send them the forum-specific
+  // FLARUM_USER_AGENT, which may be an allowlist secret for the forum's WAF.
+  if (docs) registerDocsTools(reg, DEFAULT_USER_AGENT);
   if (dev) {
     registerDevTools(reg);
     // Prompts orchestrate the flarum_dev workflow, so they ride with it.

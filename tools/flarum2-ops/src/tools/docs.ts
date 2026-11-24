@@ -206,6 +206,11 @@ export function registerDocsTools(server: McpServer, userAgent?: string, timeout
     async ({ page, maxChars }) => {
       try {
         const slug = toSlug(page) || "index";
+        // The slug becomes part of a raw.githubusercontent.com URL: ".." segments would leave the docs folder and
+        // return any repository's content labelled as Flarum docs.
+        if (!/^[A-Za-z0-9._/-]+$/.test(slug) || slug.split("/").some((seg) => seg === ".." || seg === "." || seg === "")) {
+          throw new Error(`"${page}" is not a docs page (use a slug such as "rest-api" or "extend/api")`);
+        }
         // Pages are docs/<slug>.md; folder index pages are docs/<slug>/index.md.
         const candidates = [`${GH_RAW_BASE}/${slug}.md`, `${GH_RAW_BASE}/${slug}/index.md`];
         let md: string | null = null;

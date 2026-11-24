@@ -68,8 +68,9 @@ test("flarum_request POST with an object body reaches the network single-encoded
   const t = register(writeClient());
   await call(t.get("flarum_request"), {
     method: "POST",
-    path: "/settings",
+    path: "/custom-route",
     body: { custom_less: "body{}" },
+    confirm: true,
   });
   assert.equal(calls[0].init.method, "POST");
   // One layer of JSON: decoding once yields the object, not a string.
@@ -84,8 +85,9 @@ test("flarum_request normalizes a JSON-string body so it is not double-encoded",
   const t = register(writeClient());
   await call(t.get("flarum_request"), {
     method: "POST",
-    path: "/settings",
+    path: "/custom-route",
     body: '{"custom_less":"body{}"}',
+    confirm: true,
   });
   const decoded = JSON.parse(calls[0].init.body);
   assert.equal(typeof decoded, "object");
@@ -95,7 +97,7 @@ test("flarum_request normalizes a JSON-string body so it is not double-encoded",
 test("flarum_request leaves a genuine non-JSON string body untouched", async () => {
   stubFetch({});
   const t = register(writeClient());
-  await call(t.get("flarum_request"), { method: "POST", path: "/raw", body: "hello world" });
+  await call(t.get("flarum_request"), { method: "POST", path: "/raw", body: "hello world", confirm: true });
   // Not JSON-structured: passed through as-is (client still JSON-encodes it).
   assert.equal(calls[0].init.body, JSON.stringify("hello world"));
 });
@@ -121,6 +123,7 @@ test("flarum_create issues POST with a JSON:API body", async () => {
   stubFetch({ data: { type: "discussions", id: "1" } });
   const t = register(writeClient());
   await call(t.get("flarum_create"), {
+    confirm: true,
     type: "discussions",
     attributes: { title: "x" },
     relationships: { tags: { data: [] } },
@@ -135,7 +138,7 @@ test("flarum_create issues POST with a JSON:API body", async () => {
 test("flarum_update issues PATCH with the id in path and body", async () => {
   stubFetch({ data: {} });
   const t = register(writeClient());
-  await call(t.get("flarum_update"), { type: "discussions", id: "42", attributes: { isLocked: true } });
+  await call(t.get("flarum_update"), { type: "discussions", id: "42", attributes: { isLocked: true }, confirm: true });
   assert.equal(calls[0].init.method, "PATCH");
   assert.equal(new URL(calls[0].url).pathname, "/api/discussions/42");
   assert.deepEqual(JSON.parse(calls[0].init.body), {
@@ -150,6 +153,7 @@ test("flarum_update sends an empty attributes object when only relationships cha
   stubFetch({ data: {} });
   const t = register(writeClient());
   await call(t.get("flarum_update"), {
+    confirm: true,
     type: "discussions",
     id: "42",
     relationships: { tags: { data: [{ type: "tags", id: "2" }] } },
@@ -167,7 +171,7 @@ test("flarum_update sends an empty attributes object when only relationships cha
 test("flarum_delete issues DELETE and returns a deleted marker", async () => {
   stubFetch({});
   const t = register(writeClient());
-  const res = await call(t.get("flarum_delete"), { type: "posts", id: "7" });
+  const res = await call(t.get("flarum_delete"), { type: "posts", id: "7", confirm: true });
   assert.equal(calls[0].init.method, "DELETE");
   assert.equal(new URL(calls[0].url).pathname, "/api/posts/7");
   assert.deepEqual(JSON.parse(res.content[0].text), { deleted: true, type: "posts", id: "7" });
@@ -196,4 +200,110 @@ test("API errors surface as an isError result containing the API body", async ()
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /403/);
   assert.match(res.content[0].text, /nope/);
+});
+
+test("every write tool is a dry run without confirm and never hits the network", async () => {
+  stubFetch({});
+  const t = register(writeClient());
+  const args = {
+    flarum_create: { type: "discussions", attributes: { title: "x" } },
+    flarum_update: { type: "discussions", id: "1", attributes: { isLocked: true } },
+    flarum_delete: { type: "users", id: "5" },
+    flarum_create_discussion: { title: "t", content: "c" },
+    flarum_reply: { discussionId: "1", content: "c" },
+    flarum_request: { method: "DELETE", path: "/api/discussions/3" },
+  };
+  for (const [name, a] of Object.entries(args)) {
+    const res = await call(t.get(name), a);
+    const out = JSON.parse(res.content[0].text);
+    assert.equal(out.dryRun, true, name);
+    assert.ok(out.wouldSend, name);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("flarum_request refuses writes to endpoints that have a policy-checked tool, even with confirm", async () => {
+  stubFetch({});
+  const t = register(writeClient());
+  const cases = [
+    ["POST", "/settings"], ["DELETE", "/api/settings"], ["PATCH", "/extensions/flarum-gdpr"], ["POST", "/permission"], ["DELETE", "/logo"],
+    // spellings that reach the same route
+    ["POST", "/settings?x=1"], ["POST", "/settings#a"], ["POST", "/settings/"], ["POST", "//settings"], ["POST", "/x/../settings"],
+    ["POST", "/./settings"], ["POST", "/%73ettings"], ["POST", "/Settings"], ["PATCH", "/extensions/flarum-gdpr?y"],
+  ];
+  for (const [method, path] of cases) {
+    const res = await call(t.get("flarum_request"), { method, path, body: { extensions_enabled: "[]" }, confirm: true });
+    assert.equal(res.isError, true, `${method} ${path}`);
+    assert.match(res.content[0].text, /use flarum_|must not contain "\." or "\.\." segments/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("generic create/update/delete cannot reach managed endpoints (uninstall, toggle, settings), even with confirm", async () => {
+  stubFetch({});
+  const t = register(writeClient());
+  const cases = [
+    ["flarum_delete", { type: "extensions", id: "flarum-tags", confirm: true }], // core: uninstall + migrateDown
+    ["flarum_update", { type: "extensions", id: "flarum-tags", attributes: { enabled: true }, confirm: true }], // core reads top-level enabled -> disables
+    ["flarum_create", { type: "settings", attributes: { extensions_enabled: "[]" }, confirm: true }],
+    ["flarum_delete", { type: "Extensions", id: "x", confirm: true }],
+  ];
+  for (const [name, args] of cases) {
+    const res = await call(t.get(name), args);
+    assert.equal(res.isError, true, `${name} ${JSON.stringify(args)}`);
+    assert.match(res.content[0].text, /refused here/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("type/id must be single path segments, so they cannot be used to walk to other routes", () => {
+  const t = register(writeClient());
+  const schema = (n) => z.object(t.get(n).cfg.inputSchema);
+  for (const bad of [{ type: "../settings", id: "1" }, { type: "discussions", id: "../../settings" }, { type: "a/b", id: "1" }, { type: "..", id: "1" }]) {
+    assert.equal(schema("flarum_delete").safeParse(bad).success, false, JSON.stringify(bad));
+  }
+  assert.equal(schema("flarum_delete").safeParse({ type: "fof-upload-files", id: "a1b2.c" }).success, true);
+});
+
+test("flarum_request also refuses extension bisect, the extension manager and cache clear", async () => {
+  stubFetch({});
+  const t = register(writeClient());
+  for (const [method, path] of [["POST", "/extension-bisect"], ["POST", "/extension-manager/extensions"], ["PATCH", "/extension-manager/extensions/fof-upload"], ["DELETE", "/cache"]]) {
+    const res = await call(t.get("flarum_request"), { method, path, confirm: true });
+    assert.equal(res.isError, true, `${method} ${path}`);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("dot segments never reach the network, so a forum in a subfolder cannot be walked to its own /api/settings", async () => {
+  stubFetch({});
+  const sub = new FlarumClient({ baseUrl: "http://forum.test/forum", readOnly: false });
+  const t = register(sub);
+  for (const path of ["/../../forum/api/settings", "/x/%2e%2e/settings", "/..\\settings", "/./settings"]) {
+    const res = await call(t.get("flarum_request"), { method: "POST", path, body: { extensions_enabled: "[]" }, confirm: true });
+    assert.equal(res.isError, true, path);
+  }
+  for (const path of ["/../../forum/api/access-tokens", "/discussions/.."]) {
+    const res = await call(t.get("flarum_request"), { method: "GET", path });
+    assert.equal(res.isError, true, path);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("access tokens never reach the agent: token attributes and our own credential are masked, token writes refused", async () => {
+  const secret = "dev-token-abcdef123456";
+  const doc = { data: [{ type: "access-tokens", id: "7", attributes: { token: "other-token-999999", title: "ci" } }], included: [{ type: "access-tokens", id: "8", attributes: { token: secret } }], meta: { echo: secret } };
+  stubFetch(doc);
+  const c = new FlarumClient({ baseUrl: "http://forum.test", apiKey: secret, readOnly: true });
+  const t = register(c);
+  const out = (await call(t.get("flarum_list"), { type: "access-tokens" })).content[0].text;
+  assert.equal(out.includes(secret), false);
+  assert.equal(out.includes("other-token-999999"), false);
+  assert.match(out, /"title": "ci"/);
+  stubFetch({});
+  const w = register(writeClient());
+  for (const [name, args] of [["flarum_create", { type: "access-tokens", attributes: { title: "x" }, confirm: true }], ["flarum_delete", { type: "access-tokens", id: "7", confirm: true }]]) {
+    assert.equal((await call(w.get(name), args)).isError, true, name);
+  }
+  assert.equal(calls.length, 0);
 });

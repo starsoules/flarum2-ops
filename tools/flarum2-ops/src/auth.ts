@@ -7,7 +7,7 @@
  * resolves the actor and its groups so callers can fail loudly instead.
  */
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { FlarumClient } from "./flarum-client.js";
 
@@ -129,13 +129,32 @@ export function promptVisible(question: string): Promise<string> {
  * POST /api/token with remember=1 (session_remember token: 5-year sliding
  * lifetime) and store it in a 0600 file. Returns the user id only.
  */
+/**
+ * Warning text when a login would send the password (and later the token) unencrypted over the network:
+ * plain http to anything but this machine. Undefined when the URL is https or local.
+ */
+export function insecureLoginWarning(forumUrl: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(forumUrl);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "http:") return undefined;
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || /^127\./.test(host)) return undefined;
+  return `${u.origin} is plain http: the password and the token would cross the network unencrypted. Use https in base_url.`;
+}
+
 export async function loginAndStore(
   forumUrl: string,
   identification: string,
   password: string,
   tokenFile: string,
+  userAgent?: string,
 ): Promise<{ userId: string }> {
-  const client = new FlarumClient({ baseUrl: forumUrl });
+  // Same identifiable User-Agent as every other request: WAFs that block generic agents would block the login first.
+  const client = new FlarumClient({ baseUrl: forumUrl, userAgent });
   const res = await client.raw<{ token?: string; userId?: string | number; errors?: unknown }>({
     method: "POST",
     path: "/token",
@@ -147,7 +166,10 @@ export async function loginAndStore(
   }
   const dir = dirname(tokenFile);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(tokenFile, `${res.body.token}\n`, { mode: 0o600 });
-  chmodSync(tokenFile, 0o600);
+  // New file with 0600 from the first byte, then rename: an existing file with wider rights is never written to.
+  const tmp = `${tokenFile}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${res.body.token}\n`, { mode: 0o600, flag: "wx" });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, tokenFile);
   return { userId: String(res.body.userId ?? "") };
 }

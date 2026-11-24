@@ -14,17 +14,13 @@ import { join } from "node:path";
 import { Ops, OpsError } from "../ops.js";
 import { DesignSets } from "../designset.js";
 import { IMAGE_KINDS, type ImageKind } from "../policy.js";
-import { errorResult, result } from "./shared.js";
+import { confirmField, errorResult, result } from "./shared.js";
 
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+/** Writes only local files (screenshots, gallery, snapshots, a new set) and may take the write lock: not read-only. */
+const LOCAL_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
-
-const confirmField = z
-  .boolean()
-  .optional()
-  .default(false)
-  .describe("false (default) = dry run that changes nothing. Set true only after the user approved the dry-run result.");
 
 function failure(err: unknown) {
   if (err instanceof OpsError) {
@@ -148,11 +144,15 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
           "Saved to design-sets/<name>/screenshots (or _live-screenshots). Does not change the forum.",
         inputSchema: {
           name: z.string().optional().describe("Store under this set's screenshots/ (omit for _live-screenshots)."),
-          viewports: z.array(z.number().int().min(320).max(3840)).optional(),
-          pages: z.array(z.string()).optional().describe('Forum paths, default ["/", "/all", first discussion, "/tags"].'),
+          viewports: z.array(z.number().int().min(320).max(3840)).max(6).optional(),
+          pages: z
+            .array(z.string().regex(/^\/(?![\/\\])[^\s@\\]*$/, "a forum path starting with one /"))
+            .max(20)
+            .optional()
+            .describe('Forum paths, default ["/", "/all", first discussion, "/tags"].'),
           schemes: z.array(z.enum(["light", "dark", "light-hc", "dark-hc"])).optional(),
         },
-        annotations: { ...READ, idempotentHint: false },
+        annotations: LOCAL_WRITE,
       },
       wrap(({ name, viewports, pages, schemes }: { name?: string; viewports?: number[]; pages?: string[]; schemes?: string[] }) =>
         sets.screenshot({ outDir: name ? join(sets.setDir(name), "screenshots") : join(ops.cfg.designSetsDir, "_live-screenshots"), viewports, pages, schemes }),
@@ -165,7 +165,7 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
         title: "Build the design-set gallery",
         description: "Write design-sets/gallery.html: every set with its screenshots side by side, for choosing. Local file only.",
         inputSchema: {},
-        annotations: { ...READ, idempotentHint: false },
+        annotations: LOCAL_WRITE,
       },
       wrap(() => sets.gallery()),
     );
@@ -181,10 +181,10 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
           reason: z.string().optional().default("manual"),
           exportAs: z.string().optional().describe("Name of a new design-set to create from the live design."),
         },
-        annotations: { ...READ, idempotentHint: false },
+        annotations: LOCAL_WRITE,
       },
       wrap(async ({ reason, exportAs }: { reason: string; exportAs?: string }) =>
-        exportAs ? sets.exportLive(exportAs) : { id: (await sets.snapshot(reason)).id },
+        exportAs ? sets.exportLive(exportAs) : { id: (await sets.manualSnapshot(reason)).id },
       ),
     );
 
@@ -194,7 +194,7 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
         title: "Create a design-set",
         description: "Create design-sets/<name>/ from the template (set.json, custom.less, header/footer HTML, static/, images/). Local files only.",
         inputSchema: { name: z.string(), title: z.string().optional() },
-        annotations: { ...READ, idempotentHint: false },
+        annotations: LOCAL_WRITE,
       },
       wrap(({ name, title }: { name: string; title?: string }) => sets.create(name, title)),
     );
@@ -216,7 +216,7 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
         allowProtected: z.boolean().optional().default(false),
         confirm: confirmField,
       },
-      annotations: WRITE,
+      annotations: DESTRUCTIVE,
     },
     wrap(({ values, allowProtected, confirm }: { values: Record<string, unknown>; allowProtected: boolean; confirm: boolean }) =>
       ops.settingsSet(values, { confirm, allowProtected }),
@@ -228,10 +228,16 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
     {
       title: "Reset settings to defaults",
       description: "DELETE /api/settings {keys}. Flarum does not rebuild CSS after a reset, so a cache clear follows automatically for CSS keys. Dry run unless confirm.",
-      inputSchema: { keys: z.array(z.string()).min(1), confirm: confirmField },
+      inputSchema: {
+        keys: z.array(z.string()).min(1),
+        allowProtected: z.boolean().optional().default(false).describe("Required for protected keys (mail_*, maintenance_mode, drivers, secrets); only with the user's explicit approval."),
+        confirm: confirmField,
+      },
       annotations: DESTRUCTIVE,
     },
-    wrap(({ keys, confirm }: { keys: string[]; confirm: boolean }) => ops.settingsReset(keys, { confirm })),
+    wrap(({ keys, allowProtected, confirm }: { keys: string[]; allowProtected: boolean; confirm: boolean }) =>
+      ops.settingsReset(keys, { confirm, allowProtected }),
+    ),
   );
 
   server.registerTool(
@@ -243,7 +249,7 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
         "Checks first: ≤2 MB, ≤24 MP, real type png/jpeg/gif/webp/bmp (no SVG/ICO). Flarum scales logos to 60px high (WebP) and " +
         "favicons to fit 64x64 (PNG), replaces the previous file and returns the new URL. Dry run unless confirm.",
       inputSchema: { kind: kindEnum, file: z.string().describe("Absolute path of a local image file."), confirm: confirmField },
-      annotations: WRITE,
+      annotations: DESTRUCTIVE,
     },
     wrap(({ kind, file, confirm }: { kind: ImageKind; file: string; confirm: boolean }) => ops.uploadImage(kind, file, { confirm })),
   );
@@ -278,7 +284,7 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
       title: "Enable or disable an extension",
       description:
         "PATCH /api/extensions/{id} {enabled}. Enabling RUNS DATABASE MIGRATIONS and publishes assets; disabling never rolls them back. " +
-        "Requires its own explicit user approval (separate from design changes) and a DB backup first. Uninstall is deliberately not offered. Dry run unless confirm.",
+        "Requires its own explicit user approval (separate from design changes) and a DB backup first. Uninstall is not part of this tool (only flarum_ext_remove with FLARUM_EXTENSIONS=1). Dry run unless confirm.",
       inputSchema: { id: z.string().describe('Extension id, e.g. "flarum-gdpr".'), enabled: z.boolean(), confirm: confirmField },
       annotations: DESTRUCTIVE,
     },
@@ -320,12 +326,13 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
     {
       title: "Try on a design-set",
       description:
-        "Snapshot → apply → screenshot matrix → automatic rollback, so the forum ends exactly as before. Screenshots go to the set's screenshots/ " +
+        "Snapshot → apply → screenshot matrix → automatic rollback of what the preview wrote (settings, tags, images; an image " +
+        "is uploaded again, which Flarum re-encodes, from the applied set's source file when possible). Screenshots go to the set's screenshots/ " +
         "(then run designset_gallery). Without confirm returns the plan (dry run).",
       inputSchema: {
         name: z.string(),
-        viewports: z.array(z.number().int().min(320).max(3840)).optional(),
-        pages: z.array(z.string()).optional(),
+        viewports: z.array(z.number().int().min(320).max(3840)).max(6).optional(),
+        pages: z.array(z.string().regex(/^\/(?![\/\\])[^\s@\\]*$/, "a forum path starting with one /")).max(20).optional(),
         confirm: confirmField,
       },
       annotations: DESTRUCTIVE,
@@ -341,10 +348,31 @@ export function registerOpsTools(server: McpServer, ops: Ops): void {
       title: "Roll back to a snapshot",
       description:
         "Restore settings exactly (value / NULL / absent), images (re-upload or delete), tag styling and the applied-set marker from a snapshot " +
-        "(default: latest), then verify. Dry run (shows what differs) unless confirm.",
-      inputSchema: { snapshot: z.string().optional(), confirm: confirmField },
+        "(default: the last pre-write snapshot; confirm with the id the dry run returns), then verify. Snapshots the current " +
+        "state first (returned as undo). Dry run (shows what differs) unless confirm.",
+      inputSchema: {
+        snapshot: z.string().optional(),
+        allowOtherForum: z.boolean().optional().default(false).describe("Restore a snapshot taken of another forum (shared design-sets folder). Only with explicit approval."),
+        allowProtected: z.boolean().optional().default(false).describe("Also restore protected keys (mail_*, maintenance_mode, drivers) listed as skippedProtected. Only with explicit approval."),
+        confirm: confirmField,
+      },
       annotations: DESTRUCTIVE,
     },
-    wrap(({ snapshot, confirm }: { snapshot?: string; confirm: boolean }) => sets.rollback(snapshot, { confirm })),
+    wrap(({ snapshot, allowOtherForum, allowProtected, confirm }: { snapshot?: string; allowOtherForum: boolean; allowProtected: boolean; confirm: boolean }) =>
+      sets.rollback(snapshot, { confirm, allowOtherForum, allowProtected }),
+    ),
+  );
+
+  server.registerTool(
+    "designset_prune_snapshots",
+    {
+      title: "Delete old snapshots",
+      description:
+        "Delete all but the newest `keep` snapshots (default 20); the snapshot of the applied set is always kept. Every write takes a " +
+        "snapshot, so they accumulate; nothing is pruned automatically. Deleted snapshots cannot be rolled back to. Dry run unless confirm.",
+      inputSchema: { keep: z.number().int().min(1).optional().default(20), confirm: confirmField },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(({ keep, confirm }: { keep: number; confirm: boolean }) => sets.pruneSnapshots({ keep, confirm })),
   );
 }

@@ -25,6 +25,23 @@ const IMAGE_ROUTES = {
 };
 const URL_ATTR = { logo: "logoUrl", "logo-dark-mode": "logoDarkModeUrl", "email-logo": "emailLogoUrl", favicon: "faviconUrl" };
 
+/** Content of the multipart part named `field`, as raw bytes. */
+function filePart(raw, contentType, field) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/.exec(contentType);
+  if (!m) return undefined;
+  const boundary = Buffer.from(`--${m[1] ?? m[2]}`);
+  let pos = raw.indexOf(boundary);
+  while (pos !== -1) {
+    const next = raw.indexOf(boundary, pos + boundary.length);
+    if (next === -1) break;
+    const part = raw.subarray(pos + boundary.length + 2, next - 2); // skip CRLF after boundary, before next
+    const sep = part.indexOf("\r\n\r\n");
+    if (sep !== -1 && part.subarray(0, sep).toString("latin1").includes(`name="${field}"`)) return part.subarray(sep + 4);
+    pos = next;
+  }
+  return undefined;
+}
+
 export function makeForumRoot() {
   const root = mkdtempSync(join(tmpdir(), "flarum2-ops-test-"));
   mkdirSync(join(root, "public", "assets"), { recursive: true });
@@ -48,7 +65,16 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
   );
   const permissions = { viewForum: [2], startDiscussion: [3] };
   const requests = [];
-  const behaviour = { cacheFails: false, failSettingsKey: null };
+  // requireUserAgent: like a WAF, answer 403 to "/" unless this UA is sent. hangRoot: never answer "/".
+  // The ignore* switches make the server accept a write (success status) without applying it, so a test can
+  // prove that the engine's read-back notices: ignoreDeleteKey (DELETE /api/settings keeps this key),
+  // ignoreUpload (image upload answers 200 but stores no path), ignoreExtensionToggle, ignorePermission.
+  // rootStatus / apiStatus: answer GET "/" or GET "/api" with this error status instead of the real page.
+  const behaviour = {
+    cacheFails: false, failSettingsKey: null, requireUserAgent: null, hangRoot: false, extraStylesheets: [], failTagPatch: false,
+    slowSettingsMs: 0, ignoreSettingsKey: null, leaveLessError: false, cacheDropped: false,
+    ignoreDeleteKey: null, ignoreUpload: false, ignoreExtensionToggle: false, ignorePermission: false, rootStatus: null, apiStatus: null,
+  };
 
   const actorFor = (req) => {
     const auth = req.headers.authorization ?? "";
@@ -84,7 +110,7 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
     const url = new URL(req.url, "http://x");
     const actor = actorFor(req);
     const base = `http://127.0.0.1:${server.address().port}`;
-    requests.push({ method: req.method, path: url.pathname, auth: Boolean(actor), contentType: req.headers["content-type"] ?? "", body: raw.toString("utf8").slice(0, 2000) });
+    requests.push({ method: req.method, path: url.pathname, auth: Boolean(actor), contentType: req.headers["content-type"] ?? "", userAgent: req.headers["user-agent"] ?? "", body: raw.toString("utf8").slice(0, 2000) });
     const json = (status, body) => {
       res.writeHead(status, { "content-type": "application/vnd.api+json" });
       res.end(body === undefined ? "" : JSON.stringify(body));
@@ -95,17 +121,37 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
     };
     const forbidden = () => json(403, { errors: [{ status: "403", code: "permission_denied" }] });
     const isAdmin = actor?.groups.includes("1");
+    if (behaviour.redirectTo && url.pathname.startsWith("/api")) {
+      res.writeHead(307, { location: behaviour.redirectTo + url.pathname });
+      return res.end();
+    }
     const p = url.pathname;
 
+    if (p === "/" && behaviour.hangRoot) return; // leave the request open
+    if (p === "/" && behaviour.requireUserAgent && req.headers["user-agent"] !== behaviour.requireUserAgent) {
+      res.writeHead(403, { "content-type": "text/plain" });
+      return res.end("error code: 1010");
+    }
+    if (p === "/" && req.method === "GET" && behaviour.rootStatus) {
+      res.writeHead(behaviour.rootStatus, { "content-type": "text/plain" });
+      return res.end("server error");
+    }
     if (p === "/" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/html" });
-      return res.end('<html><head><link rel="stylesheet" href="/assets/forum.css?v=abc"></head><body><div id="app"></div></body></html>');
+      const extra = behaviour.extraStylesheets.map((h) => `<link rel="stylesheet" href="${h}">`).join("");
+      return res.end(`<html><head><link rel="stylesheet" href="/assets/forum.css?v=abc">${extra}</head><body><div id="app"></div></body></html>`);
     }
     if (p === "/assets/forum.css") {
       res.writeHead(200, { "content-type": "text/css" });
       return res.end("body{}");
     }
+    if (p === "/api" && req.method === "GET" && behaviour.apiStatus) return json(behaviour.apiStatus, { errors: [{ status: String(behaviour.apiStatus), code: "internal" }] });
     if (p === "/api" && req.method === "GET") return json(200, forumDoc(actor, base));
+    if (p === "/api/token" && req.method === "POST") {
+      const b = JSON.parse(raw.toString("utf8"));
+      if (b.identification === "admin" && b.password === "correct-password") return json(200, { token: ADMIN_TOKEN, userId: "1" });
+      return json(401, { errors: [{ status: "401", code: "not_authenticated" }] });
+    }
     const userMatch = /^\/api\/users\/(\d+)$/.exec(p);
     if (userMatch && req.method === "GET") {
       const id = userMatch[1];
@@ -120,6 +166,10 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
       if (!isAdmin) return forbidden();
       const body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
       if (req.method === "POST") {
+        if (behaviour.slowSettingsMs) {
+          // Like a loaded Flarum: compile first, store later; the client may have given up by then.
+          await new Promise((r) => setTimeout(r, behaviour.slowSettingsMs));
+        }
         if (typeof body.custom_less === "string" && body.custom_less.includes("BROKEN")) {
           store.set("custom_less_error", "ParseError: unrecognised input");
           return json(422, { errors: [{ status: "422", code: "validation_error", detail: "ParseError: unrecognised input", source: { pointer: "/data/attributes/custom_less" } }] });
@@ -128,13 +178,21 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
           return json(500, { errors: [{ status: "500", code: "internal" }] });
         }
         for (const [k, v] of Object.entries(body)) {
+          if (k === behaviour.ignoreSettingsKey) continue; // accepted but not stored (e.g. an extension resets it)
           store.set(k, v === null ? null : typeof v === "boolean" ? (v ? "1" : "0") : String(v));
         }
-        if ("custom_less" in body) store.delete("custom_less_error");
+        if ("custom_less" in body) {
+          // One-shot: the next compile fails and leaves the flag; a later valid save clears it, as in Flarum.
+          if (behaviour.leaveLessError) {
+            store.set("custom_less_error", "ParseError at compile");
+            behaviour.leaveLessError = false;
+          }
+          else store.delete("custom_less_error");
+        }
         return empty();
       }
       if (req.method === "DELETE") {
-        for (const k of body.keys ?? []) store.delete(k);
+        for (const k of body.keys ?? []) if (k !== behaviour.ignoreDeleteKey) store.delete(k);
         return empty();
       }
     }
@@ -150,9 +208,11 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
         if (!ct.startsWith("multipart/form-data") || !raw.toString("latin1").includes(`name="${route}"`)) {
           return json(422, { errors: [{ status: "422", code: "validation_error", detail: `missing ${route} file field` }] });
         }
+        if (behaviour.ignoreUpload) return json(200, forumDoc(actor, base)); // 200, but nothing stored
         if (old && existsSync(join(forumRoot, "public", "assets", old))) rmSync(join(forumRoot, "public", "assets", old));
         const file = `${route}-${randomBytes(4).toString("hex")}.${route === "favicon" ? "png" : "webp"}`;
-        writeFileSync(join(forumRoot, "public", "assets", file), raw.subarray(0, 64));
+        // Store the uploaded file part itself (Flarum re-encodes it; the bytes are what a snapshot copies).
+        writeFileSync(join(forumRoot, "public", "assets", file), filePart(raw, ct, route) ?? raw.subarray(0, 64));
         store.set(key, file);
         const doc = forumDoc(actor, base);
         doc.data.attributes[URL_ATTR[route]] = `${base}/assets/${file}`;
@@ -167,10 +227,13 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
 
     if (p === "/api/cache" && req.method === "DELETE") {
       if (!isAdmin) return forbidden();
+      // Event names as core's ClearCacheController writes them: cleared … / failed, always closed by done.
       res.writeHead(200, { "content-type": "application/x-ndjson" });
-      res.write(JSON.stringify({ type: "started" }) + "\n");
-      res.write(JSON.stringify({ type: behaviour.cacheFails ? "failed" : "progress", step: "assets" }) + "\n");
-      return res.end(JSON.stringify({ type: "finished" }) + "\n");
+      res.write(JSON.stringify({ type: "cleared", name: "cache", files: 3 }) + "\n");
+      if (behaviour.cacheFails) res.write(JSON.stringify({ type: "failed", step: "assets:publish", message: "Publishing assets failed." }) + "\n");
+      else res.write(JSON.stringify({ type: "cleared", name: "published assets", files: null }) + "\n");
+      if (behaviour.cacheDropped) return res.end(); // connection lost before done
+      return res.end(JSON.stringify({ type: "done" }) + "\n");
     }
 
     if (p === "/api/tags" && req.method === "GET") {
@@ -181,6 +244,7 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
       if (!isAdmin) return forbidden();
       const t = tagMap.get(tagMatch[1]);
       if (!t) return json(404, { errors: [{ status: "404" }] });
+      if (behaviour.failTagPatch) return json(500, { errors: [{ status: "500", code: "internal" }] });
       const attrs = JSON.parse(raw.toString("utf8")).data.attributes;
       Object.assign(t, attrs);
       return json(200, { data: { type: "tags", id: t.id, attributes: t } });
@@ -191,6 +255,7 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
       if (!isAdmin) return forbidden();
       const list = JSON.parse(store.get("extensions_enabled") ?? "[]");
       const { enabled } = JSON.parse(raw.toString("utf8"));
+      if (behaviour.ignoreExtensionToggle) return empty();
       const next = enabled ? [...new Set([...list, ext[1]])] : list.filter((x) => x !== ext[1]);
       store.set("extensions_enabled", JSON.stringify(next));
       return empty();
@@ -199,6 +264,7 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
     if (p === "/api/permission" && req.method === "POST") {
       if (!isAdmin) return forbidden();
       const { permission, groupIds } = JSON.parse(raw.toString("utf8"));
+      if (behaviour.ignorePermission) return empty();
       permissions[permission] = groupIds;
       return empty();
     }
@@ -239,7 +305,11 @@ export async function startMockFlarum({ forumRoot, settings = {}, tags, extensio
     requests,
     behaviour,
     settingsStore,
-    close: () => new Promise((r) => server.close(r)),
+    close: () =>
+      new Promise((r) => {
+        server.close(r);
+        server.closeAllConnections?.();
+      }),
   };
 }
 
