@@ -29,4 +29,4 @@ php -l tools/flarum2-ops/helpers/settings_read.php
 - The MCP server starts read-only; write tools are registered only in write mode.
 - Claims about Flarum behaviour must be checked against the Flarum 2.0.x source before they go into code or
   references. Write a test with the mock server (`test/helpers/mock-flarum.mjs`) for every engine change.
-- Node 20+ (CI tests 20 and 22); the helpers use PHP (PDO) and optional Python 3.9+ with Playwright for screenshots.
+- Node 22+ (CI tests 22 and 24); the helpers use PHP (PDO) and optional Python 3.9+ with Playwright for screenshots.

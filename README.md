@@ -35,7 +35,7 @@ Verified against Flarum 2.0.2:
 
 - Flarum 2.0.x. Database-backed features (settings reads, snapshots, design-set apply, health) need the tools
   to run on the forum's host with read access to its `config.php`; pure API features work against any forum.
-- Node.js 20+, PHP CLI with PDO (the forum's PHP is fine).
+- Node.js 22+, PHP CLI with PDO (the forum's PHP is fine).
 - Optional: Python 3.9+ with [Playwright](https://playwright.dev/python/) and Chromium for screenshots.
 
 ## Setup
