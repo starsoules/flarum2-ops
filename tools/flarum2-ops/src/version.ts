@@ -1,5 +1,5 @@
 /** Single source of the version string (kept in sync with package.json by a test). */
-export const VERSION = "1.0.0";
+export const VERSION = "0.1.0";
 
 /**
  * Outbound User-Agent: explicit and identifiable (WAFs such as Cloudflare block
